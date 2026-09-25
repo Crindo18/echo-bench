@@ -1,0 +1,25 @@
+# A separate uv project with its own uv.lock (ADR-6): run `uv sync` inside this folder.
+# PyPI's torch wheels already include NVIDIA libraries. When you set up GPU training,
+# check the PyTorch install page for the index that matches your GPU driver.
+[project]
+name = "echo-train"
+version = "0.1.0"
+description = "Build, export and quantize the encoder. Desktop only."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "torch==2.11.*",        # ESPnet 202610 requires torchaudio <2.12, and torchaudio 2.11 needs torch 2.11
+    "torchaudio==2.11.*",
+    "espnet==202610.post2",
+    "onnx==1.23.0",
+    "onnxruntime==1.30.0",  # same version as echo-core
+    "onnxscript>=0.7,<0.8",
+    "onnxslim==0.1.96",
+    # M4 adds echo-core as a path dependency for the frontend parity test.
+]
+
+[project.scripts]
+echo-train = "echo_train:main"
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

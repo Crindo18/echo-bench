@@ -1,0 +1,21 @@
+# Never commit data, models, results or reports (blueprint sections 4.7 and 5).
+# Anything holding participant recordings or results is restricted data.
+data/
+artifacts/
+results/
+reports/
+*.db
+*.db-wal
+*.db-shm
+*.onnx
+practice_artifacts/
+
+# Python and tool caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+dist/

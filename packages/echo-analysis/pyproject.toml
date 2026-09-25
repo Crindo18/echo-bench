@@ -1,0 +1,18 @@
+[project]
+name = "echo-analysis"
+version = "0.1.0"
+description = "Statistics, figures and thesis tables. Desktop only."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "echo-bench",
+    "pandas>=3.0,<3.1",
+    "matplotlib>=3.11,<3.12",
+    # Added later: scikit-learn (M3), scipy and pingouin (M5-M9), statsmodels, openpyxl (M9).
+]
+
+[tool.uv.sources]
+echo-bench = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

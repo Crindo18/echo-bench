@@ -1,0 +1,29 @@
+# Checks that run automatically before every `git commit` (blueprint M0).
+# Turn them on once per clone with:   uv run pre-commit install
+# Run them by hand on everything with: uv run pre-commit run --all-files
+# If a hook changes a file (ruff fixes and formatting), `git add` it and commit again.
+repos:
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff (lint)
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+      - id: ruff-format
+        name: ruff (format)
+        entry: uv run ruff format
+        language: system
+        types: [python]
+      - id: mypy-echo-core
+        name: mypy (echo_core, strict)
+        entry: uv run mypy packages/echo-core/src
+        language: system
+        pass_filenames: false
+        files: ^packages/echo-core/
+      - id: forbidden-imports
+        name: no torch/espnet/librosa/pandas on the device side
+        entry: uv run pytest tests/test_architecture.py
+        language: system
+        pass_filenames: false
+        files: ^packages/

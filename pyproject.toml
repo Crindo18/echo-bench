@@ -1,0 +1,49 @@
+# ECHO-Bench workspace root (blueprint section 5).
+# This file is not a package. It lists the packages that make up the workspace
+# and holds the settings for the development tools.
+
+[tool.uv.workspace]
+members = ["packages/echo-core", "packages/echo-bench", "packages/echo-analysis"]
+# echo-train is a separate uv project with its own lockfile (ADR-6), so PyTorch
+# and ESPnet never constrain the packages that run on the Raspberry Pi.
+exclude = ["packages/echo-train"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1,<10",
+    "hypothesis>=6",
+    "ruff>=0.16,<0.17",
+    "mypy>=2.3,<2.4",
+    "pre-commit>=4.6,<5",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Where the first-party packages live, so imports are grouped correctly.
+src = [
+    "packages/echo-core/src",
+    "packages/echo-bench/src",
+    "packages/echo-analysis/src",
+    "packages/echo-train/src",
+]
+# The practice script is a scratchpad that M1 splits into proper modules.
+extend-exclude = ["packages/echo-train/scripts"]
+force-exclude = true  # also skip excluded files when pre-commit passes them by name
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]  # the formatter handles line length
+
+[tool.mypy]
+# The pre-commit hook runs mypy on echo_core only (blueprint M0): it ships on the device.
+python_version = "3.12"
+strict = true
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime", "onnxruntime.*", "psutil"]
+ignore_missing_imports = true

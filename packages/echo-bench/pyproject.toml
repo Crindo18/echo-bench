@@ -1,0 +1,25 @@
+[project]
+name = "echo-bench"
+version = "0.1.0"
+description = "Benchmarking harness that drives echo-core. Runs on the desktop and the Pi."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "echo-core",
+    "sqlalchemy>=2.0.54,<2.1",
+    "alembic>=1.20,<1.21",
+    "pydantic>=2.13,<2.14",
+    "pyyaml>=6.0.3,<7",
+    "typer>=0.27,<0.28",
+    "rich>=15.0,<16",
+    "psutil>=7.2,<8",
+]
+
+[project.scripts]
+echo-bench = "echo_bench.cli:app"
+
+[tool.uv.sources]
+echo-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
