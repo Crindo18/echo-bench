@@ -31,8 +31,9 @@ src = [
     "packages/echo-analysis/src",
     "packages/echo-train/src",
 ]
-# The practice script is a scratchpad that M1 splits into proper modules.
-extend-exclude = ["packages/echo-train/scripts"]
+# The practice script is a scratchpad (M1 turned it into proper modules). Markdown is
+# excluded because ruff would otherwise reformat code examples inside the documents.
+extend-exclude = ["packages/echo-train/scripts", "*.md"]
 force-exclude = true  # also skip excluded files when pre-commit passes them by name
 
 [tool.ruff.lint]

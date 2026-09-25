@@ -7,6 +7,7 @@ version = "0.1.0"
 description = "Build, export and quantize the encoder. Desktop only."
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "echo-core",            # the model card schema lives in one place
     "torch==2.11.*",        # ESPnet 202610 requires torchaudio <2.12, and torchaudio 2.11 needs torch 2.11
     "torchaudio==2.11.*",
     "espnet==202610.post2",
@@ -14,11 +15,23 @@ dependencies = [
     "onnxruntime==1.30.0",  # same version as echo-core
     "onnxscript>=0.7,<0.8",
     "onnxslim==0.1.96",
-    # M4 adds echo-core as a path dependency for the frontend parity test.
+    "pyyaml>=6.0.3,<7",
+    "typer>=0.27,<0.28",
+    "rich>=15.0,<16",
 ]
 
 [project.scripts]
-echo-train = "echo_train:main"
+echo-train = "echo_train.cli:app"
+
+[dependency-groups]
+dev = ["pytest>=9.1,<10"]
+
+[tool.uv.sources]
+echo-core = { path = "../echo-core", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]

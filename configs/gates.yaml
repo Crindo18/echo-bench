@@ -1,0 +1,21 @@
+# Pass/fail thresholds (blueprint section 6.8). `observed <comparator> threshold` must hold.
+# M1 evaluates G1 and G2a when a model is registered; the others arrive with their milestones.
+# Sizes use MB = 1,000,000 bytes, the stricter reading of "16 MB".
+gates:
+  G1_footprint:                {metric: int8_onnx_file_mb, comparator: "<=", threshold: 16.0, source: "SO1 D1"}
+  G2a_export_parity:           {metric: export_parity_max_abs, comparator: "<=", threshold: 1.0e-4, source: "Internal"}
+  G2b_int8_cosine:             {metric: int8_vs_fp32_mean_cosine, comparator: ">=", threshold: 0.99, source: "Internal (proposed)"}
+  G2c_int8_accuracy_drop:      {metric: int8_fewshot_accuracy_drop_pp, comparator: "<=", threshold: 1.0, source: "Internal (proposed)"}
+  G2d_cross_platform:          {metric: desktop_pi_int8_top1_agreement_pct, comparator: ">=", threshold: 99.5, source: "Internal"}
+  G3a_accuracy_a10:            {metric: aggregate_accuracy_a10_pct, comparator: ">=", threshold: 80.0, source: "SO1 D2, Table 5"}
+  G3b_lowest_participant:      {metric: lowest_participant_pre_enrollment_accuracy_pct, comparator: ">", threshold: 60.0, source: "SO1 D2"}
+  G3c_post_enrollment_floor:   {metric: post_enrollment_accuracy_floor_pct, comparator: ">=", threshold: 65.0, source: "SO4 D3"}
+  G3d_adaptation_gain:         {metric: adaptation_gain_pp, comparator: ">", threshold: 15.0, source: "SO4 D3 (K level open, section 10)"}
+  G4a_kws_category_recall:     {metric: hkws_category_top1_recall_pct, comparator: ">=", threshold: 90.0, source: "SO2 D2"}
+  G4b_kws_precision:           {metric: hkws_precision_pct, comparator: ">=", threshold: 85.0, source: "SO2 D2"}
+  G4c_emergency_false_trigger: {metric: emergency_false_trigger_pct, comparator: "<=", threshold: 5.0, source: "SO2 D2"}
+  G4d_candidate_set_size:      {metric: candidate_set_size, comparator: "<=", threshold: 10, source: "SO2 D2, Sec 1.7.8 (<= vs <, section 10)"}
+  G5a_e2e_latency_p95:         {metric: e2e_latency_p95_ms, comparator: "<=", threshold: 1500, source: "SO5 D2"}
+  G5b_tts_latency:             {metric: tts_stage_latency_ms, comparator: "<=", threshold: 800, source: "Sec 1.7.4.6.2"}
+  G6_peak_ram:                 {metric: peak_system_ram_mb, comparator: "<=", threshold: 2000, source: "Internal (proposed)"}
+  G7_run_validity:             {metric: flagged_run_count, comparator: "<=", threshold: 0, source: "Internal"}

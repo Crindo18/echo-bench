@@ -14,16 +14,17 @@ import platform
 import socket
 import sqlite3
 import sys
+from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Annotated
 
 import typer
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import inspect
+from sqlalchemy import Engine, inspect, select
 
 from echo_bench.db.migrate import current_revision, head_revision, upgrade_to_head
-from echo_bench.db.models import utc_now
+from echo_bench.db.models import BenchmarkRun, GateResult, ModelArtifact, RunMetric, utc_now
 from echo_bench.db.repository import (
     get_or_create_hardware_profile,
     get_or_create_software_env,
@@ -32,6 +33,7 @@ from echo_bench.db.repository import (
 from echo_bench.db.session import default_db_path, make_engine, make_session
 from echo_bench.env import rpi
 from echo_bench.env.fingerprint import collect_hardware, collect_software, is_wsl
+from echo_bench.gates import DEFAULT_GATES_FILE
 
 app = typer.Typer(
     help="ECHO-Bench: benchmarking harness for the ECHO encoder.", no_args_is_help=True
@@ -244,3 +246,255 @@ def doctor(
         console.print(f"{FAIL} {failures} check(s) failed.")
         raise typer.Exit(1)
     console.print(f"{OK} doctor finished with no blocking problems.")
+
+
+# ----------------------------------------------------------------------- M1
+# Heavier modules (onnx, onnxruntime, numpy) are imported inside the commands
+# that need them, so `echo-bench --help` and `doctor` stay fast.
+
+model_app = typer.Typer(help="Register and inspect model artifacts.", no_args_is_help=True)
+app.add_typer(model_app, name="model")
+
+GatesOption = Annotated[Path, typer.Option("--gates", help="Gate thresholds file.")]
+
+
+def _open_db(db: Path | None) -> Engine:
+    """The results database; it must exist and be at the latest schema revision."""
+    path = db or default_db_path()
+    revision, head = current_revision(path), head_revision()
+    if revision != head:
+        state = (
+            "does not exist yet" if revision is None else f"is at revision {revision}, not {head}"
+        )
+        console.print(f"{FAIL} {path} {state}. Run `echo-bench db init` first.")
+        raise typer.Exit(1)
+    return make_engine(path)
+
+
+def _gate_text(row: GateResult) -> str:
+    mark = OK if row.passed else FAIL
+    return f"{mark} {row.gate.split('_')[0]}: {row.observed:.4g} {row.comparator} {row.threshold:g}"
+
+
+@model_app.command("register")
+def model_register(
+    paths: Annotated[list[Path], typer.Argument(help="Artifact folders, or folders to search.")],
+    db: DbOption = None,
+    gates_file: GatesOption = DEFAULT_GATES_FILE,
+) -> None:
+    """Check artifacts against their model cards, record them, and evaluate G1 and G2a."""
+    from echo_bench.gates import load_gates
+    from echo_bench.registry import RegistryError, register_paths
+
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            try:
+                results = register_paths(session, paths, load_gates(gates_file))
+            except RegistryError as error:
+                console.print(f"{FAIL} {error}")
+                raise typer.Exit(1) from error
+            session.commit()
+            table = Table(title="Model registry", title_justify="left")
+            for column in ("model", "sha256", "size", "status", "gates"):
+                table.add_column(column)
+            for result in results:
+                artifact = result.artifact
+                gates = session.scalars(
+                    select(GateResult).where(GateResult.model_artifact_id == artifact.id)
+                ).all()
+                table.add_row(
+                    f"{artifact.name}:{artifact.variant}",
+                    artifact.sha256[:8],
+                    f"{artifact.size_bytes / 1e6:.2f} MB",
+                    "new" if result.created else "already registered",
+                    "  ".join(_gate_text(g) for g in gates) or "-",
+                )
+            console.print(table)
+    finally:
+        engine.dispose()
+
+
+@model_app.command("list")
+def model_list(db: DbOption = None) -> None:
+    """Show every registered model, newest first."""
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            rows = session.scalars(
+                select(ModelArtifact).order_by(ModelArtifact.created_at.desc())
+            ).all()
+            table = Table(title=f"{len(rows)} registered model(s)", title_justify="left")
+            for column in ("model", "sha256", "size", "parameters", "weights", "registered"):
+                table.add_column(column)
+            for row in rows:
+                params = "-" if row.param_count is None else f"{row.param_count / 1e6:.2f} M"
+                table.add_row(
+                    f"{row.name}:{row.variant}",
+                    row.sha256[:8],
+                    f"{row.size_bytes / 1e6:.2f} MB",
+                    params,
+                    row.weights_state,
+                    row.created_at[:16].replace("T", " "),
+                )
+            console.print(table)
+    finally:
+        engine.dispose()
+
+
+@model_app.command("inspect")
+def model_inspect(
+    ref: Annotated[str, typer.Argument(help="'name:variant' or a SHA-256 prefix.")],
+    db: DbOption = None,
+) -> None:
+    """Size, parameters, operators and quantization coverage of one model (section 6.3)."""
+    from echo_bench.registry import (
+        RegistryError,
+        card_of,
+        inspect_onnx,
+        resolve,
+        verify_artifact_file,
+    )
+
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            try:
+                artifact = resolve(session, ref)
+                verify_artifact_file(artifact)
+            except RegistryError as error:
+                console.print(f"{FAIL} {error}")
+                raise typer.Exit(1) from error
+            card = card_of(artifact)
+            gates = session.scalars(
+                select(GateResult).where(GateResult.model_artifact_id == artifact.id)
+            ).all()
+            path = Path(artifact.file_path)
+            size_mb = artifact.size_bytes / 1e6
+    finally:
+        engine.dispose()
+
+    console.print(f"[bold]{card.ref}[/bold]  sha256 {artifact.sha256[:12]}  ({card.weights_state})")
+    console.print(f"  file        {path}  {size_mb:.2f} MB")
+    if card.param_count is not None:
+        console.print(f"  parameters  {card.param_count / 1e6:.2f} M (from the model card)")
+    for row in gates:
+        console.print(f"  gate        {_gate_text(row)}")
+    if path.suffix != ".onnx":
+        return
+    info = inspect_onnx(path)
+    console.print(f"  opset       {info['opset']}")
+    console.print(f"  inputs      {info['inputs']}")
+    console.print(f"  outputs     {info['outputs']}")
+    for family, (quantized, total) in info["coverage"].items():
+        if total:
+            share = 100 * quantized / total
+            console.print(
+                f"  {family:<11} {quantized}/{total} weight-bearing nodes quantized ({share:.0f}%)"
+            )
+    storage = ", ".join(
+        f"{dtype} {size / 1e6:.2f} MB" for dtype, size in info["bytes_by_dtype"].items()
+    )
+    console.print(f"  stored      {storage}")
+    table = Table(title="Largest stored tensors", title_justify="left")
+    for column in ("tensor", "dtype", "shape", "MB"):
+        table.add_column(column)
+    for name, dtype, shape, nbytes in info["largest"]:
+        table.add_row(name[-60:], dtype, str(shape), f"{nbytes / 1e6:.2f}")
+    console.print(table)
+    top = ", ".join(f"{op} {count}" for op, count in info["op_histogram"][:12])
+    console.print(f"  operators   {top}")
+
+    # Compute per utterance: the same on every machine, so it predicts relative Pi speed.
+    from echo_bench.registry import count_macs
+
+    counts = {seconds: count_macs(path, card, seconds) for seconds in (1, 3, 5, 8)}
+    line = " | ".join(f"{s} s: {total / 1e9:.2f}" for s, (total, _) in counts.items())
+    console.print(f"  compute     billion multiply-accumulates per utterance  {line}")
+    total5, groups5 = counts[5]
+    share = ", ".join(f"{name} {macs / total5:.0%}" for name, macs in list(groups5.items())[:5])
+    console.print(f"  at 5 s      {share}")
+
+
+@app.command()
+def perf(
+    config: Annotated[
+        Path, typer.Option("--config", help="e.g. configs/benchmarks/perf_smoke.yaml")
+    ],
+    db: DbOption = None,
+    name: Annotated[
+        str | None, typer.Option(help="Campaign name.  [default: the config's file name]")
+    ] = None,
+) -> None:
+    """Time each model at each input length, with memory and temperature (section 6.1)."""
+    from pydantic import ValidationError
+
+    from echo_bench.config.loader import load_perf_config
+    from echo_bench.registry import RegistryError
+    from echo_bench.runners.perf import run_perf
+
+    try:
+        cfg, cfg_json, cfg_sha = load_perf_config(config)
+    except (OSError, ValidationError) as error:
+        console.print(f"{FAIL} {config}: {error}")
+        raise typer.Exit(1) from error
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            try:
+                campaign = run_perf(
+                    session,
+                    cfg,
+                    name=name or config.stem,
+                    config_json=cfg_json,
+                    config_sha256=cfg_sha,
+                    progress=console.print,
+                )
+            except RegistryError as error:
+                console.print(f"{FAIL} {error}")
+                raise typer.Exit(1) from error
+            runs = session.scalars(
+                select(BenchmarkRun).where(BenchmarkRun.campaign_id == campaign.id)
+            ).all()
+            table = Table(
+                title="Encoder latency in ms (p50 = median, p95 = 95% of runs faster)",
+                title_justify="left",
+            )
+            for column in ("model", "threads", "length", "p50", "p95", "run status"):
+                table.add_column(column)
+            for run in runs:
+                artifact = session.get(ModelArtifact, run.model_artifact_id)
+                metrics = session.scalars(select(RunMetric).where(RunMetric.run_id == run.id)).all()
+                values = {(m.name, m.scope): m.value for m in metrics}
+                for seconds in cfg.input_durations_s:
+                    scope = f"encoder@{seconds:g}s"
+                    table.add_row(
+                        f"{artifact.name}:{artifact.variant}" if artifact else "?",
+                        str(run.ort_intra_threads)
+                        + ("" if run.ort_allow_spinning else " (no spin)"),
+                        f"{seconds:g} s",
+                        f"{values.get(('latency_p50_ms', scope), float('nan')):.1f}",
+                        f"{values.get(('latency_p95_ms', scope), float('nan')):.1f}",
+                        run.status if not run.invalid_reason else f"invalid: {run.invalid_reason}",
+                    )
+            console.print(table)
+            if campaign.notes:
+                console.print(f"{WARN} {campaign.notes}")
+            console.print(
+                f"{OK} Campaign {campaign.id[:8]} saved. Next: uv run echo-bench report perf --latest"
+            )
+    finally:
+        engine.dispose()
+
+
+def _load_plugins() -> None:
+    """Desktop-only command groups, such as `report` from echo-analysis, add themselves
+    through the 'echo_bench.plugins' entry point, so echo_bench never imports them."""
+    for entry in entry_points(group="echo_bench.plugins"):
+        try:
+            app.add_typer(entry.load(), name=entry.name)
+        except Exception as error:  # a broken plugin must not break the harness
+            console.print(f"{WARN} Could not load the {entry.name!r} command: {error}")
+
+
+_load_plugins()

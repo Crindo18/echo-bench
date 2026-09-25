@@ -1,13 +1,11 @@
 """echo_train: build, export and quantize the encoder (desktop only, own lockfile, ADR-6).
 
-In M1, scripts/echo_practice_run.py is split into build_model.py, export_onnx.py,
-parity.py, quantize.py and make_model_card.py (blueprint section 5), and the
-`echo-train` command gets its real subcommands.
+config.py       reads configs/models/*.yaml
+build_model.py  E-Branchformer encoder + masked mean pooling -> EmbeddingNet
+export_onnx.py  ONNX FP32 export and the multi-length parity test (gate G2a)
+quantize.py     preprocess -> dynamic | static QDQ INT8 versions
+artifacts.py    writes artifacts/models/<name>/<sha8>/ folders with model cards
+cli.py          the `echo-train` command
 """
 
 __version__ = "0.1.0"
-
-
-def main() -> None:
-    print("echo-train subcommands (build-random, export, parity, quantize, card) arrive in M1.")
-    print("For now: uv run python scripts/echo_practice_run.py")

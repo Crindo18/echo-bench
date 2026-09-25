@@ -1,0 +1,16 @@
+# Quick end-to-end check of the perf pipeline (blueprint section 4.6 example). A few minutes.
+kind: perf
+models:
+  - ebf-12m-rand:onnx_fp32
+  - ebf-12m-rand:onnx_int8_dynamic
+  - ebf-12m-rand:onnx_int8_static
+input_durations_s: [1, 3, 8]
+warmup_iters: 10
+measure_iters: 100
+block_size: 25
+cooldown_below_c: null        # sustained regime: no cooldown between blocks
+ort:
+  intra_op_threads: [4]
+  allow_spinning: [true]
+monitor:
+  sample_hz: 10

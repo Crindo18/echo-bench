@@ -5,6 +5,8 @@ description = "Benchmarking harness that drives echo-core. Runs on the desktop a
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "echo-core",
+    "numpy>=2.5,<2.6",
+    "onnx==1.23.0",         # reading model graphs for `model inspect`
     "sqlalchemy>=2.0.54,<2.1",
     "alembic>=1.20,<1.21",
     "pydantic>=2.13,<2.14",

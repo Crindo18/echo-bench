@@ -1,14 +1,19 @@
 """Shared test fixtures."""
 
-from collections.abc import Iterator
+import shutil
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import numpy as np
+import onnx
 import pytest
+from onnx import TensorProto, helper, numpy_helper
 from sqlalchemy import Engine
 from sqlalchemy.orm import Session
 
 from echo_bench.db.migrate import upgrade_to_head
 from echo_bench.db.session import make_engine, make_session
+from echo_core.model_card import CARD_FILENAME, ModelCard, sha256_file
 
 
 @pytest.fixture
@@ -30,3 +35,100 @@ def engine(db_path: Path) -> Iterator[Engine]:
 def session(engine: Engine) -> Iterator[Session]:
     with make_session(engine) as session:
         yield session
+
+
+# ------------------------------------------------------------- M1 fixtures# A tiny stand-in for the encoder (mean over time, then one matrix multiply)
+# with the same inputs and outputs as the real model. It builds in milliseconds,
+# so the registry and perf tests don't need PyTorch.
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+TINY_DIM = 16
+
+
+def build_tiny_onnx(path: Path, n_mels: int = 80, dim: int = TINY_DIM) -> None:
+    weight = np.random.default_rng(0).standard_normal((n_mels, dim)).astype(np.float32)
+    graph = helper.make_graph(
+        [
+            helper.make_node("ReduceMean", ["feats"], ["pooled"], axes=[1], keepdims=0),
+            helper.make_node("MatMul", ["pooled", "weight"], ["embedding"]),
+        ],
+        "tiny",
+        [
+            helper.make_tensor_value_info("feats", TensorProto.FLOAT, ["B", "T", n_mels]),
+            helper.make_tensor_value_info("feats_lens", TensorProto.INT64, ["B"]),
+        ],
+        [helper.make_tensor_value_info("embedding", TensorProto.FLOAT, ["B", dim])],
+        [numpy_helper.from_array(weight, "weight")],
+    )
+    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    model.ir_version = 9
+    onnx.save(model, str(path))
+
+
+def tiny_card_fields(variant: str, **extra: object) -> dict[str, object]:
+    return {
+        "name": "tiny-rand",
+        "variant": variant,
+        "weights_state": "random_init",
+        "seed": 0,
+        "param_count": 80 * TINY_DIM,
+        "io": {
+            "inputs": {"feats": ["B", "T", 80], "feats_lens": ["B"]},
+            "outputs": {"embedding": ["B", TINY_DIM]},
+        },
+        "encoder": {"impl": "tests.tiny", "input_size": 80},
+        "embedding": {"dim": TINY_DIM},
+        "export": {
+            "torch": "none",
+            "exporter": "torchscript",
+            "opset": 17,
+            "dynamic_axes": ["B", "T"],
+            "trace_length_s": 3,
+            "parity_lengths_s": [1, 3],
+            "parity_max_abs": 2e-7,
+        },
+        "created_at": "2026-09-25T00:00:00.000Z",
+    } | extra
+
+
+def write_artifact(models_dir: Path, onnx_path: Path, fields: dict[str, object]) -> Path:
+    sha = sha256_file(onnx_path)
+    folder = models_dir / sha[:8]
+    folder.mkdir(parents=True)
+    shutil.move(str(onnx_path), folder / "model.onnx")
+    card = ModelCard.model_validate(fields | {"files_sha256": {"model.onnx": sha}})
+    (folder / CARD_FILENAME).write_text(card.to_json())
+    return folder
+
+
+@pytest.fixture
+def tiny_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
+    """artifacts/models/tiny-rand/<sha8>/ for an FP32 model and its dynamic INT8 version,
+    inside a temporary working folder that also holds configs/gates.yaml."""
+    from onnxruntime.quantization import QuantType, quantize_dynamic
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "configs").mkdir()
+    shutil.copy(REPO_ROOT / "configs" / "gates.yaml", tmp_path / "configs" / "gates.yaml")
+    models_dir = tmp_path / "artifacts" / "models" / "tiny-rand"
+    models_dir.mkdir(parents=True)
+
+    build_tiny_onnx(tmp_path / "fp32.onnx")
+    quantize_dynamic(
+        str(tmp_path / "fp32.onnx"), str(tmp_path / "int8.onnx"), weight_type=QuantType.QInt8
+    )
+    fp32 = write_artifact(models_dir, tmp_path / "fp32.onnx", tiny_card_fields("onnx_fp32"))
+    fp32_sha = sha256_file(fp32 / "model.onnx")
+    quantization = {"method": "dynamic", "onnxruntime": "test"}
+    int8 = write_artifact(
+        models_dir,
+        tmp_path / "int8.onnx",
+        tiny_card_fields("onnx_int8_dynamic", parent_sha256=fp32_sha, quantization=quantization),
+    )
+    return {"root": tmp_path, "models": models_dir, "fp32": fp32, "int8": int8}
+
+
+@pytest.fixture
+def card_fields() -> Callable[..., dict[str, object]]:
+    """Valid model-card fields for the tiny model (tests add files_sha256 or overrides)."""
+    return tiny_card_fields
