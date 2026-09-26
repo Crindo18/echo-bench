@@ -1,0 +1,21 @@
+# TORGO speakers (Rudzicz et al., 2012). The public release has no F02.
+# Severity: speech-language pathologist ratings (Frenchay Dysarthria Assessment) as tabulated in
+# "Training Data Augmentation for Dysarthric Automatic Speech Recognition by
+# Text-to-Dysarthric-Speech Synthesis", Interspeech 2024 (arXiv:2406.08568), Table 1.
+# moderate_severe = "moderate-to-severe". VERIFY against the TORGO documentation before reporting.
+code,cohort,severity_tier,intelligibility_pct,sex
+F01,dysarthric,severe,,F
+F03,dysarthric,moderate,,F
+F04,dysarthric,mild,,F
+M01,dysarthric,severe,,M
+M02,dysarthric,severe,,M
+M03,dysarthric,mild,,M
+M04,dysarthric,severe,,M
+M05,dysarthric,moderate_severe,,M
+FC01,control,,,F
+FC02,control,,,F
+FC03,control,,,F
+MC01,control,,,M
+MC02,control,,,M
+MC03,control,,,M
+MC04,control,,,M

@@ -22,7 +22,7 @@ repos:
         pass_filenames: false
         files: ^packages/echo-core/
       - id: forbidden-imports
-        name: no torch/espnet/librosa/pandas on the device side
+        name: no torch/espnet/librosa/pandas/sklearn on the device side
         entry: uv run pytest tests/test_architecture.py
         language: system
         pass_filenames: false

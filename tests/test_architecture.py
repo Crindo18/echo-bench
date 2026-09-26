@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAVY = {"torch", "torchaudio", "espnet", "espnet2", "librosa", "pandas"}
+HEAVY = {"torch", "torchaudio", "espnet", "espnet2", "librosa", "pandas", "sklearn", "matplotlib"}
 RULES = {
     "packages/echo-core/src": HEAVY | {"echo_bench", "echo_analysis", "echo_train"},
     "packages/echo-bench/src": HEAVY | {"echo_analysis", "echo_train"},

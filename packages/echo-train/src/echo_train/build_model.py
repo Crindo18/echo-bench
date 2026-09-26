@@ -7,9 +7,10 @@ import torch
 
 from echo_train.config import ModelConfig
 
-# ESPnet prints "Failed to import Flash Attention" on import. Flash Attention is a
-# GPU-only speed-up that ECHO doesn't use, so the message is hidden.
-with contextlib.redirect_stdout(io.StringIO()):
+# ESPnet prints "Failed to import Flash Attention" (to stderr) on import. Flash
+# Attention is a GPU-only speed-up that ECHO doesn't use, so the message is hidden.
+# A real import error still raises and shows its traceback.
+with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
     from espnet2.asr.encoder.e_branchformer_encoder import EBranchformerEncoder
 
 ENCODER_IMPL = "espnet2.asr.encoder.e_branchformer_encoder.EBranchformerEncoder"

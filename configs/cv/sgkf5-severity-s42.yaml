@@ -1,0 +1,10 @@
+# Speaker-independent 5-fold cross-validation, stratified by severity (thesis §1.7.4.4, blueprint M3).
+# Fold i: group i is the test set, group i+1 the validation set, the rest training.
+# Plans are immutable once stored: to change anything, save this file under a new name.
+name: sgkf5-severity-s42
+strategy: stratified_group_kfold
+k: 5
+stratify_by: severity_tier
+seed: 42
+datasets: [torgo, uaspeech]
+validation: next_fold

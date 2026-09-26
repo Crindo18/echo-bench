@@ -16,15 +16,15 @@ import sqlite3
 import sys
 from importlib.metadata import entry_points
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from rich.console import Console
 from rich.table import Table
-from sqlalchemy import Engine, inspect, select
+from sqlalchemy import Engine, func, inspect, select
 
 from echo_bench.db.migrate import current_revision, head_revision, upgrade_to_head
-from echo_bench.db.models import BenchmarkRun, GateResult, ModelArtifact, RunMetric, utc_now
+from echo_bench.db.models import BenchmarkRun, CvPlan, GateResult, ModelArtifact, RunMetric, utc_now
 from echo_bench.db.repository import (
     get_or_create_hardware_profile,
     get_or_create_software_env,
@@ -263,10 +263,13 @@ def _open_db(db: Path | None) -> Engine:
     path = db or default_db_path()
     revision, head = current_revision(path), head_revision()
     if revision != head:
-        state = (
-            "does not exist yet" if revision is None else f"is at revision {revision}, not {head}"
-        )
-        console.print(f"{FAIL} {path} {state}. Run `echo-bench db init` first.")
+        if revision is None:
+            console.print(f"{FAIL} {path} does not exist yet. Run `echo-bench db init` first.")
+        else:
+            console.print(
+                f"{FAIL} {path} is at schema revision {revision}, not {head}. "
+                "Run `echo-bench db upgrade` (your results are kept)."
+            )
         raise typer.Exit(1)
     return make_engine(path)
 
@@ -485,6 +488,361 @@ def perf(
             )
     finally:
         engine.dispose()
+
+
+# ----------------------------------------------------------------------- M3
+
+data_app = typer.Typer(
+    help="Ingest corpora, check them for leakage, report coverage (M3).", no_args_is_help=True
+)
+ingest_app = typer.Typer(
+    help="Scan a corpus folder into a manifest and load it.", no_args_is_help=True
+)
+app.add_typer(data_app, name="data")
+data_app.add_typer(ingest_app, name="ingest")
+MANIFEST_DIR = Path("data/manifests")
+VersionOption = Annotated[
+    str, typer.Option(help="Dataset version; change it when the files change.")
+]
+AllChannelsOption = Annotated[
+    bool, typer.Option("--all-channels", help="Also record the non-primary microphones.")
+]
+
+
+def _ingest(
+    db: Path | None,
+    name: str,
+    version: str,
+    root: Path,
+    speakers_csv: Path,
+    scan: Any,
+    primary: str,
+) -> None:
+    """Shared steps: scan -> manifest (temporary file first) -> database -> summary."""
+    from echo_bench.data.ingest_common import IngestError
+    from echo_bench.data.loader import load_dataset
+    from echo_bench.data.manifest import write_manifest
+    from echo_bench.data.speakers import load_speakers
+    from echo_bench.db.models import Dataset
+
+    engine = _open_db(db)
+    try:
+        speakers = load_speakers(speakers_csv)
+        console.print(f"Scanning {root} ...")
+        records, report = scan(speakers, console.print)
+        MANIFEST_DIR.mkdir(parents=True, exist_ok=True)
+        final = MANIFEST_DIR / f"{name}-{version}.jsonl"
+        temporary = MANIFEST_DIR / f".{name}-{version}.jsonl.tmp"
+        manifest_sha = write_manifest(records, temporary)
+        with make_session(engine) as session:
+            existing = session.scalar(
+                select(Dataset).where(Dataset.name == name, Dataset.version == version)
+            )
+            if existing is not None and existing.manifest_sha256 != manifest_sha:
+                temporary.unlink()
+                raise IngestError(
+                    f"{name} {version} is already loaded from different files. "
+                    "Datasets are immutable: use a new --version."
+                )
+            temporary.replace(final)
+            _, created = load_dataset(
+                session,
+                name=name,
+                version=version,
+                access_level="licensed_corpus",
+                manifest_path=final,
+                speakers=speakers,
+                primary_channel=primary,
+                root_hint=root.name,
+            )
+            session.commit()
+    except (IngestError, OSError, ValueError) as error:
+        console.print(f"{FAIL} {error}")
+        raise typer.Exit(1) from error
+    finally:
+        engine.dispose()
+
+    status = "loaded" if created else "already loaded, unchanged"
+    table = Table(title=f"{name} {version}: {status}", title_justify="left")
+    table.add_column("what")
+    table.add_column("count", justify="right")
+    for key, value in sorted(report.counts.items(), key=lambda kv: (kv[0] != "used", kv[0])):
+        table.add_row("files used" if key == "used" else key, str(value))
+    groups: dict[str, int] = {}
+    for code in sorted({r.speaker for r in records}):
+        group = speakers[code].severity_tier or speakers[code].cohort
+        groups[group] = groups.get(group, 0) + 1
+    table.add_row("speakers", ", ".join(f"{group} {n}" for group, n in sorted(groups.items())))
+    table.add_row("classes (labels)", str(len({r.label_key for r in records})))
+    table.add_row("manifest", f"{final} (sha256 {manifest_sha[:12]})")
+    console.print(table)
+    console.print(
+        "Next: uv run echo-bench data validate, then "
+        "uv run echo-bench cv plan --config configs/cv/sgkf5-severity-s42.yaml"
+    )
+
+
+@ingest_app.command("torgo")
+def ingest_torgo(
+    root: Annotated[
+        Path, typer.Option(help="The TORGO folder (with F/, M/, ... or the speaker folders).")
+    ],
+    speakers: Annotated[Path, typer.Option(help="Speaker table.")] = Path(
+        "configs/datasets/torgo_speakers.csv"
+    ),
+    version: VersionOption = "v1",
+    primary_channel: Annotated[str, typer.Option(help="headMic or arrayMic.")] = "headMic",
+    all_channels: AllChannelsOption = False,
+    db: DbOption = None,
+) -> None:
+    """TORGO: prompts + head/array microphones, one recording group per prompt and session."""
+    from echo_bench.data.ingest_torgo import scan_torgo
+
+    def scan(meta: Any, progress: Any) -> Any:
+        return scan_torgo(
+            root,
+            meta,
+            primary_channel=primary_channel,
+            all_channels=all_channels,
+            progress=progress,
+        )
+
+    _ingest(db, "torgo", version, root, speakers, scan, primary_channel)
+
+
+@ingest_app.command("uaspeech")
+def ingest_uaspeech(
+    root: Annotated[
+        Path,
+        typer.Option(help="The UASpeech audio folder (one version: original or noise-reduced)."),
+    ],
+    speakers: Annotated[Path, typer.Option(help="Speaker table.")] = Path(
+        "configs/datasets/uaspeech_speakers.csv"
+    ),
+    wordlist: Annotated[
+        Path | None, typer.Option(help="CSV with columns code,word (the official list).")
+    ] = None,
+    version: VersionOption = "v1",
+    primary_channel: Annotated[str, typer.Option(help="Microphone M2-M8.")] = "M5",
+    all_channels: AllChannelsOption = False,
+    db: DbOption = None,
+) -> None:
+    """UASpeech: <speaker>_<block>_<word>_<mic>.wav, one recording group per word and block."""
+    from echo_bench.data.ingest_uaspeech import load_wordlist, scan_uaspeech
+
+    words = load_wordlist(wordlist) if wordlist else None
+
+    def scan(meta: Any, progress: Any) -> Any:
+        return scan_uaspeech(
+            root,
+            meta,
+            primary_channel=primary_channel,
+            all_channels=all_channels,
+            wordlist=words,
+            progress=progress,
+        )
+
+    _ingest(db, "uaspeech", version, root, speakers, scan, primary_channel)
+
+
+@data_app.command("list")
+def data_list(db: DbOption = None) -> None:
+    """Every loaded dataset version with its speakers, classes and recordings."""
+    from sqlalchemy import text as sql
+
+    engine = _open_db(db)
+    try:
+        with engine.connect() as connection:
+            rows = connection.execute(
+                sql(
+                    """
+                    SELECT d.name, d.version, d.primary_channel, d.created_at,
+                           (SELECT COUNT(*) FROM speaker s WHERE s.dataset_id = d.id),
+                           (SELECT COUNT(*) FROM label l WHERE l.dataset_id = d.id),
+                           (SELECT COUNT(*) FROM utterance u
+                              WHERE u.dataset_id = d.id AND u.is_primary_channel = 1),
+                           (SELECT COALESCE(SUM(duration_ms), 0) FROM utterance u
+                              WHERE u.dataset_id = d.id AND u.is_primary_channel = 1)
+                    FROM dataset d ORDER BY d.name, d.created_at
+                    """
+                )
+            ).all()
+    finally:
+        engine.dispose()
+    table = Table(title=f"{len(rows)} dataset version(s)", title_justify="left")
+    for column in (
+        "dataset",
+        "version",
+        "primary mic",
+        "speakers",
+        "classes",
+        "recordings",
+        "hours",
+        "loaded",
+    ):
+        table.add_column(column)
+    for name, version, mic, created, n_spk, n_lab, n_utt, ms in rows:
+        table.add_row(
+            name,
+            version,
+            mic or "-",
+            str(n_spk),
+            str(n_lab),
+            str(n_utt),
+            f"{ms / 3.6e6:.2f}",
+            created[:16].replace("T", " "),
+        )
+    console.print(table)
+
+
+@data_app.command("validate")
+def data_validate(db: DbOption = None) -> None:
+    """Check leakage rules L1-L2 for every CV plan, plus recording-group consistency."""
+    from echo_bench.data.leakage import validate
+
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            issues = validate(session)
+            n_plans = session.scalar(select(func.count()).select_from(CvPlan)) or 0
+    finally:
+        engine.dispose()
+    errors = [i for i in issues if i.level == "error"]
+    if issues:
+        table = Table(title="Data validation", title_justify="left")
+        for column in ("rule", "level", "problem"):
+            table.add_column(column)
+        for issue in issues:
+            table.add_row(
+                issue.rule,
+                f"{FAIL if issue.level == 'error' else WARN} {issue.level}",
+                issue.message,
+            )
+        console.print(table)
+    if errors:
+        console.print(f"{FAIL} {len(errors)} error(s): fix them before training or evaluating.")
+        raise typer.Exit(1)
+    console.print(
+        f"{OK} No leakage found ({n_plans} CV plan(s) checked, {len(issues)} warning(s))."
+    )
+
+
+@data_app.command("coverage")
+def data_coverage(
+    dataset: Annotated[str | None, typer.Option(help="Only this dataset, e.g. torgo.")] = None,
+    db: DbOption = None,
+) -> None:
+    """Classes per speaker with enough recordings for K = 3, 5 and 10 (K support + 1 query)."""
+    from echo_bench.data.coverage import K_LEVELS, coverage
+
+    engine = _open_db(db)
+    try:
+        with make_session(engine) as session:
+            rows = coverage(session, dataset)
+    finally:
+        engine.dispose()
+    table = Table(
+        title="Feasible K per speaker: classes with at least K + 1 recordings", title_justify="left"
+    )
+    for column in (
+        "dataset",
+        "speaker",
+        "group",
+        "classes",
+        "median recordings",
+        *(f"K={k}" for k in K_LEVELS),
+    ):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            row.dataset,
+            row.speaker,
+            row.severity_tier or row.cohort,
+            str(row.classes),
+            f"{row.median_recordings:g}",
+            *(str(row.feasible[k]) for k in K_LEVELS),
+        )
+    console.print(table)
+
+
+# ----------------------------------------------------------- early accuracy check
+
+fewshot_app = typer.Typer(
+    help="Few-shot accuracy with Prototypical Networks.", no_args_is_help=True
+)
+app.add_typer(fewshot_app, name="fewshot")
+
+
+def _speaker_groups(path: Path | None, dataset_hint: str) -> dict[str, str]:
+    from echo_bench.data.speakers import load_speakers
+
+    if path is None:
+        guess = Path("configs/datasets") / f"{dataset_hint}_speakers.csv"
+        path = guess if guess.is_file() else None
+    if path is None:
+        return {}
+    return {code: meta.severity_tier or meta.cohort for code, meta in load_speakers(path).items()}
+
+
+def _pct(value: float | None) -> str:
+    return "-" if value is None else f"{100 * value:.1f}%"
+
+
+@fewshot_app.command("quick")
+def fewshot_quick(
+    embeddings: Annotated[
+        list[Path],
+        typer.Option("--embeddings", help=".npz from `echo-train embed`; repeat to compare."),
+    ],
+    speakers: Annotated[
+        Path | None, typer.Option(help="Speaker table [default: from the manifest name].")
+    ] = None,
+    k: Annotated[
+        list[int] | None, typer.Option("--k", help="Enrollment sizes to test [default: 1 2 3].")
+    ] = None,
+    ways: Annotated[
+        int, typer.Option(help="Classes per episode (ECHO after H-KWS: under 10).")
+    ] = 10,
+    episodes: Annotated[int, typer.Option(help="Random episodes per speaker and condition.")] = 20,
+    seed: int = 42,
+    normalize: Annotated[bool, typer.Option(help="Scale embeddings to length 1 first.")] = False,
+) -> None:
+    """Early accuracy check: speaker-independent (SI) and personal K-shot prototypes per speaker."""
+    from echo_bench.fewshot.embedding_cache import load_embeddings
+    from echo_bench.fewshot.quick import evaluate, summarize
+
+    ks = k or [1, 2, 3]
+    conditions = ["SI", *(f"K={n}" for n in ks)]
+    overall: list[tuple[str, dict[str, float | None]]] = []
+    for path in embeddings:
+        es = load_embeddings(path)
+        hint = str(es.metadata.get("manifest", "")).split("-")[0]
+        groups = _speaker_groups(speakers, hint)
+        results = evaluate(
+            es, groups, ks=ks, ways=ways, episodes=episodes, seed=seed, normalize=normalize
+        )
+        rows = summarize(results, conditions)
+        table = Table(
+            title=f"{es.name}: {len(results)} speakers, {len(set(es.label))} classes, {ways}-way episodes",
+            title_justify="left",
+        )
+        for column in ("group", "speakers", *conditions):
+            table.add_column(column, justify="left" if column == "group" else "right")
+        for group, n, values in rows:
+            table.add_row(group, str(n), *(_pct(values[c]) for c in conditions))
+        console.print(table)
+        overall.append((es.name, rows[-1][2] if rows and rows[-1][0] == "all dysarthric" else {}))
+    if len(overall) > 1:
+        table = Table(title="All dysarthric speakers, side by side", title_justify="left")
+        for column in ("encoder", *conditions):
+            table.add_column(column, justify="left" if column == "encoder" else "right")
+        for name, values in overall:
+            table.add_row(name, *(_pct(values.get(c)) for c in conditions))
+        console.print(table)
+    console.print(
+        f"Chance is about {100 / ways:.0f}% ({ways}-way). SI = prototypes from other speakers only; "
+        "K=k = k of the speaker's own recordings per class. A quick check, not the thesis protocol (M5)."
+    )
 
 
 def _load_plugins() -> None:

@@ -206,3 +206,54 @@ def quantize_command(
     console.print(
         f"{VARIANT_OF[method]} -> {folder}  {size:.2f} MB  G1 {verdict}  cosine {cosine:.4f}  ({status})"
     )
+
+
+@app.command("embed")
+def embed_command(
+    manifest: Annotated[
+        Path, typer.Option(help="From M3, e.g. ../../data/manifests/torgo-v1.jsonl")
+    ],
+    root: Annotated[
+        Path, typer.Option(help="The corpus folder the manifest's paths are relative to.")
+    ],
+    out: Annotated[
+        Path, typer.Option(help="Output .npz, e.g. ../../data/embeddings/torgo-v1__ls100-ebf.npz")
+    ],
+    model: Annotated[
+        str, typer.Option(help="hf:<user>/<repo> or a local ESPnet model folder.")
+    ] = "hf:pyf98/librispeech_100_e_branchformer",
+    random_weights: Annotated[
+        bool,
+        typer.Option(
+            "--random-weights", help="Same architecture, untrained: the floor to compare against."
+        ),
+    ] = False,
+    device: Annotated[str, typer.Option(help="cpu, or cuda if PyTorch sees your GPU.")] = "cpu",
+    limit: Annotated[
+        int | None, typer.Option(help="Only the first N utterances (a quick trial).")
+    ] = None,
+) -> None:
+    """Embed every primary-channel utterance with a trained ESPnet encoder (early accuracy check)."""
+    from echo_train.embed import EmbedError, embed_manifest
+
+    try:
+        summary = embed_manifest(
+            manifest,
+            root.expanduser(),
+            out,
+            model_source=model,
+            random_weights=random_weights,
+            device=device,
+            limit=limit,
+            progress=console.print,
+        )
+    except (EmbedError, OSError) as error:
+        console.print(f"{FAIL} {error}")
+        raise typer.Exit(1) from error
+    console.print(
+        f"[green]✓[/green] {summary['count']} embeddings of size {summary['dim']} in "
+        f"{summary['seconds']:.0f} s -> {out}"
+    )
+    console.print(
+        "Next (repository root): uv run echo-bench fewshot quick --embeddings <this file> [--embeddings <another>]"
+    )

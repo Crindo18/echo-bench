@@ -1,17 +1,17 @@
 """Tables of the ECHO-Bench results database (blueprint section 4.3), as SQLAlchemy 2.0 models.
 
-M0 creates the tables that M1 needs:
+Revision 0001 (M0) created the tables that M1 needs:
     provenance  schema_meta, hardware_profile, software_env
     models      model_artifact
     execution   campaign, benchmark_run, latency_sample, resource_sample
     results     run_metric, gate_result
+Revision 0002 (M3) adds the data layer:
+    data        dataset, speaker, label, utterance, cv_plan, fold_assignment
+    plus model_artifact.cv_plan_id/fold_index and benchmark_run.cv_plan_id/fold_index.
 
-The other tables arrive as new Alembic migrations when a milestone needs them:
-dataset, speaker, label, utterance, cv_plan and fold_assignment in M3;
-embedding_set, fewshot_condition, episode, episode_support and prediction in M5;
-manual_measurement in M8. Columns that point at those tables
-(model_artifact.cv_plan_id and fold_index, benchmark_run.embedding_set_id,
-cv_plan_id and fold_index, latency_sample.utterance_id) are added at the same time.
+Still to come as new migrations: embedding_set, fewshot_condition, episode,
+episode_support and prediction in M5 (with benchmark_run.embedding_set_id and
+latency_sample.utterance_id); manual_measurement in M8.
 
 Conventions (section 4.1): text UUID keys, ISO-8601 UTC text timestamps, 0/1
 integers for booleans, JSON stored as text and checked with json_valid(), and
@@ -23,7 +23,16 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import REAL, CheckConstraint, ForeignKey, Index, MetaData, Text, text
+from sqlalchemy import (
+    REAL,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    MetaData,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Predictable constraint names make future migrations (Alembic batch mode) reliable.
@@ -176,6 +185,10 @@ class ModelArtifact(Base):
         default=0, server_default=text("0")
     )  # passed desktop gates
     created_at: Mapped[str] = mapped_column(default=utc_now)
+    cv_plan_id: Mapped[str | None] = mapped_column(
+        ForeignKey("cv_plan.id")
+    )  # fold-matched encoder (leakage rule L4); added in M3
+    fold_index: Mapped[int | None]
 
 
 # -- Execution ------------------------------------------------------------------
@@ -234,6 +247,8 @@ class BenchmarkRun(Base):
     invalid_reason: Mapped[str | None]  # e.g. 'under-voltage occurred (bit 16)'
     started_at: Mapped[str] = mapped_column(default=utc_now)
     finished_at: Mapped[str | None]
+    cv_plan_id: Mapped[str | None] = mapped_column(ForeignKey("cv_plan.id"))  # added in M3
+    fold_index: Mapped[int | None]
 
 
 class LatencySample(Base):
@@ -311,3 +326,124 @@ class GateResult(Base):
     observed: Mapped[float]
     passed: Mapped[int]
     evaluated_at: Mapped[str] = mapped_column(default=utc_now)
+
+
+# -- Data (M3, revision 0002) ------------------------------------------------------
+# Privacy by design: speakers are pseudonymous codes only. No names, contact details
+# or diagnoses; add a column only if the analysis plan needs it AND consent covers it.
+
+DATASET_ACCESS = ("licensed_corpus", "restricted_participant", "synthetic")
+SPEAKER_COHORTS = ("dysarthric", "control", "participant", "voice_actor")
+FOLD_ROLES = ("train", "val", "test")
+CV_STRATEGIES = ("stratified_group_kfold", "leave_one_speaker_out")
+
+
+class Dataset(Base):
+    __tablename__ = "dataset"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    name: Mapped[str]  # torgo | uaspeech | echo_participants | negatives | synthetic
+    version: Mapped[str]
+    access_level: Mapped[str]
+    root_hint: Mapped[str | None]  # documentation only; the real root comes from local config
+    manifest_path: Mapped[str]
+    manifest_sha256: Mapped[str]
+    primary_channel: Mapped[str | None]  # the single mic channel used for evaluation
+    created_at: Mapped[str] = mapped_column(default=utc_now)
+
+    __table_args__ = (
+        one_of("access_level", *DATASET_ACCESS),
+        UniqueConstraint("name", "version", name="uq_dataset_name_version"),
+    )
+
+
+class Speaker(Base):
+    __tablename__ = "speaker"
+    __table_args__ = (
+        one_of("cohort", *SPEAKER_COHORTS),
+        CheckConstraint(
+            "intelligibility_pct IS NULL OR intelligibility_pct BETWEEN 0 AND 100",
+            name="intelligibility_pct_range",
+        ),
+        CheckConstraint("sex IS NULL OR sex IN ('F', 'M')", name="sex_allowed"),
+        UniqueConstraint("dataset_id", "code", name="uq_speaker_dataset_code"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("dataset.id"))
+    code: Mapped[str]  # pseudonymous only: F02, M05, P07
+    cohort: Mapped[str]
+    severity_tier: Mapped[str | None]  # very_low|low|mid|high (UASpeech) or mild..severe (TORGO)
+    intelligibility_pct: Mapped[float | None]
+    sex: Mapped[str | None]
+
+
+class Label(Base):
+    __tablename__ = "label"
+    __table_args__ = (
+        is_bool("is_emergency"),
+        UniqueConstraint("dataset_id", "key", name="uq_label_dataset_key"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("dataset.id"))
+    key: Mapped[str]  # 'pain' | UASpeech word code
+    text: Mapped[str]  # sentence template or word
+    category: Mapped[str | None]  # Emergency | Basic Needs | ... | proxy:<group> for corpora
+    is_emergency: Mapped[int] = mapped_column(default=0, server_default=text("0"))
+
+
+class Utterance(Base):
+    __tablename__ = "utterance"
+    __table_args__ = (
+        is_bool("is_primary_channel"),
+        CheckConstraint("duration_ms > 0", name="duration_ms_positive"),
+        UniqueConstraint("dataset_id", "audio_path", name="uq_utterance_dataset_audio_path"),
+        Index("ix_utterance_speaker_label", "speaker_id", "label_id"),
+        Index("ix_utterance_group", "recording_group_id"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    dataset_id: Mapped[str] = mapped_column(ForeignKey("dataset.id"))
+    speaker_id: Mapped[str] = mapped_column(ForeignKey("speaker.id"))
+    label_id: Mapped[str] = mapped_column(ForeignKey("label.id"))
+    recording_group_id: Mapped[str]  # one physical utterance across all mics/channels
+    session: Mapped[str | None]  # TORGO session | UASpeech block B1-B3 | ECHO session
+    channel: Mapped[str | None]  # mic/channel id
+    is_primary_channel: Mapped[int] = mapped_column(default=1, server_default=text("1"))
+    audio_path: Mapped[str]  # relative to the dataset root
+    audio_sha256: Mapped[str]
+    sample_rate: Mapped[int]
+    duration_ms: Mapped[int]
+    recorded_at: Mapped[str | None]  # participant sessions: enforces the >=24 h test separation
+
+
+class CvPlan(Base):
+    __tablename__ = "cv_plan"
+    __table_args__ = (
+        one_of("strategy", *CV_STRATEGIES),
+        CheckConstraint("k >= 2", name="k_at_least_2"),
+        is_json("dataset_ids_json"),
+    )
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(unique=True)  # e.g. sgkf5-severity-s42
+    strategy: Mapped[str]
+    k: Mapped[int]
+    stratify_by: Mapped[str]  # severity_tier
+    seed: Mapped[int]
+    dataset_ids_json: Mapped[str]
+    created_at: Mapped[str] = mapped_column(default=utc_now)
+
+
+class FoldAssignment(Base):
+    __tablename__ = "fold_assignment"
+    __table_args__ = (
+        one_of("role", *FOLD_ROLES),
+        CheckConstraint("fold_index >= 0", name="fold_index_nonnegative"),
+    )
+
+    cv_plan_id: Mapped[str] = mapped_column(ForeignKey("cv_plan.id"), primary_key=True)
+    fold_index: Mapped[int] = mapped_column(primary_key=True)
+    speaker_id: Mapped[str] = mapped_column(ForeignKey("speaker.id"), primary_key=True)
+    role: Mapped[str]

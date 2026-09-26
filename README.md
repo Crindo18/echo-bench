@@ -2,7 +2,7 @@
 
 Benchmarking harness for the ECHO INT8 E-Branchformer, desktop first and then
 Raspberry Pi 5 (4 GB). The design is in `docs/ECHO_Bench_Blueprint.md`; this
-repository is at milestone **M1 (MVP: architecture-level performance on the desktop)**.
+repository is at milestone **M3 (data layer and cross-validation plan)**; M2 waits for the Pi.
 
 ## Layout
 
@@ -64,6 +64,10 @@ A plain `uv run` installs the desktop-only analysis packages.
 | `uv run echo-bench model inspect <name:variant>` | Size, parameters, operators, quantization coverage, compute per utterance |
 | `uv run echo-bench perf --config <file>` | Latency, memory and temperature per model and input length |
 | `uv run echo-bench report perf --latest` | Table and figure for the newest perf campaign (desktop only) |
+| `uv run echo-bench data ingest torgo\|uaspeech --root <folder>` | Scan a corpus into a manifest and the database |
+| `uv run echo-bench data list / validate / coverage` | Loaded datasets; leakage rules L1-L2; feasible K per speaker |
+| `uv run echo-bench cv plan --config <file>` / `cv summary` | Make the speaker-independent folds; fold table (desktop only) |
+| `uv run echo-bench fewshot quick --embeddings <npz> ...` | Early accuracy check: Prototypical Networks on encoder embeddings |
 | `uv run pytest` | Runs every test |
 | `uv run pre-commit run --all-files` | Runs lint, format, type and import checks |
 
@@ -92,7 +96,11 @@ It runs five steps; each one also works on its own:
 4. `echo-bench perf` with `configs/benchmarks/perf_smoke.yaml`, pinned to 4 physical cores
 5. `echo-bench report perf --latest`: console tables and `reports/perf_<id>_latency_vs_length.png`
 
-Rebuilding the same recipe reproduces byte-identical files (same `<sha8>` folders).
+Rebuilding the same recipe on the same machine reproduces byte-identical files (same
+`<sha8>` folders). Another processor can round a few starting weights differently in the
+last digit (differences around 3e-8), which changes the fingerprint but not the model's
+size, speed or behaviour. To share a model between machines, copy its folder instead of
+rebuilding it.
 Desktop numbers show trends only; the Pi numbers come in M2 (section 6.1).
 
 ### Refining the model
@@ -134,3 +142,89 @@ uv run echo-train quantize --fp32 ../../artifacts/models/ebf-12m-rand/<sha8> \
 - [ ] `echo-bench model inspect` confirms the parameter count (about 13.06 M) and compute (about 3.1 billion MACs at 5 s)
 - [ ] `docs/feasibility.md` numbers checked against your own run
 - [ ] Figure saved under `reports/`; numbers noted for the M1 write-up
+
+## M3: data layer and cross-validation plan (desktop)
+
+**Get the corpora** and keep them outside this repository (licensed data is never committed):
+
+- TORGO: free for academic, non-profit use from the University of Toronto
+  (http://www.cs.toronto.edu/~complingweb/data/TORGO/torgo.html); cite Rudzicz et al. (2012).
+  Unpack F, FC, M and MC into one folder, for example `~/corpora/TORGO`.
+- UASpeech: request access from the University of Illinois. Point `--root` at **one** version
+  of the audio (original or noise-reduced); the ingester refuses duplicate copies. Optionally
+  export the official word list to a CSV with columns `code,word` and pass it with `--wordlist`.
+
+**Check the speaker tables first.** `configs/datasets/torgo_speakers.csv` and
+`uaspeech_speakers.csv` hold each speaker's cohort and severity tier, with their sources in the
+header. The tiers decide how the folds are stratified, so verify them against the corpus
+documentation.
+
+```bash
+uv run echo-bench db upgrade          # adds the M3 tables; existing results are kept
+uv run echo-bench data ingest torgo --root ~/corpora/TORGO
+uv run echo-bench data ingest uaspeech --root ~/corpora/UASpeech/audio
+uv run echo-bench data list
+uv run echo-bench cv plan --config configs/cv/sgkf5-severity-s42.yaml
+uv run echo-bench data validate       # must end with "No leakage found"
+uv run echo-bench data coverage       # which K (3, 5, 10) each speaker's recordings support
+uv run echo-bench cv summary          # the fold table for Chapters 3 and 5, saved under reports/
+```
+
+How it works:
+
+- **One recording, one group.** The same utterance captured by several microphones shares a
+  `recording_group_id`, and exactly one microphone is primary (TORGO: head mic; UASpeech: M5, the
+  microphone used for per-word prototypes in prior prototype-based UASpeech work). By default
+  only primary files are ingested; `--all-channels` adds the others.
+- **Datasets and plans are immutable.** Re-ingesting identical files changes nothing; changed
+  files need a new `--version`. A CV plan can't be edited, only replaced by one with a new name,
+  so every trained model can point at the exact folds it used (rule L4).
+- **The folds** (thesis §1.7.4.4): scikit-learn's `StratifiedGroupKFold` over speakers, stratified
+  by corpus and severity tier. In fold i, group i is the test set, group i+1 the validation set,
+  and the rest is training.
+- **Manifests** (`data/manifests/*.jsonl`, git-ignored) list every file with its SHA-256.
+
+## M3 checklist (blueprint section 7.2)
+
+- [ ] Speaker tables checked against the corpus documentation
+- [ ] TORGO ingested; UASpeech ingested once access is granted
+- [ ] `echo-bench data validate` is clean
+- [ ] Fold summary table saved (`echo-bench cv summary`) for Chapters 3 and 5
+
+## Early accuracy check (before training our own model)
+
+Question: do E-Branchformer embeddings plus Prototypical Networks separate dysarthric words at
+all, and how does a Conformer compare? Published ESPnet encoders trained on the same 100 hours of
+LibriSpeech answer that now, with no training. Run after `echo-bench data ingest torgo`:
+
+```bash
+cd packages/echo-train
+M=../../data/manifests/torgo-v1.jsonl; E=../../data/embeddings
+uv run echo-train embed --manifest $M --root ~/corpora/TORGO --out $E/torgo-v1__ls100-ebf.npz \
+    --model hf:pyf98/librispeech_100_e_branchformer
+uv run echo-train embed --manifest $M --root ~/corpora/TORGO --out $E/torgo-v1__ls100-conformer.npz \
+    --model hf:pyf98/librispeech_100h_conformer
+uv run echo-train embed --manifest $M --root ~/corpora/TORGO --out $E/torgo-v1__ebf-random.npz \
+    --model hf:pyf98/librispeech_100_e_branchformer --random-weights
+cd ../..
+uv run echo-bench fewshot quick --embeddings data/embeddings/torgo-v1__ls100-ebf.npz \
+    --embeddings data/embeddings/torgo-v1__ls100-conformer.npz \
+    --embeddings data/embeddings/torgo-v1__ebf-random.npz
+```
+
+Add `--limit 200` to an `embed` command for a quick trial, and `--device cuda` if PyTorch sees
+your GPU. The first run downloads each model once (into the Hugging Face cache).
+
+Reading the result:
+
+- **SI** uses prototypes from other speakers only (the K = 0 baseline); **K=k** uses k of the
+  speaker's own recordings per class. K above SI is the personalization effect SO4 is about.
+- **Random weights** is the floor: the same E-Branchformer, untrained. The trained encoders
+  should be well above it.
+- **E-Branchformer vs Conformer**, both trained on identical data, is the fair architecture
+  comparison. A clear Conformer lead would be a reason to revisit the model choice.
+- Caveats: these are 12-block encoders (about 25M parameters, above the 16 MB budget), trained
+  on typical read speech and not fine-tuned on dysarthric speech, and TORGO repeats each word
+  only a few times per speaker (see `echo-bench data coverage`). An early signal, not a thesis
+  result. The embedder refuses a checkpoint whose weights don't all load, because ESPnet would
+  otherwise skip them silently and leave part of the encoder random.

@@ -7,13 +7,15 @@ dependencies = [
     "echo-bench",
     "pandas>=3.0,<3.1",
     "matplotlib>=3.11,<3.12",
-    # Added later: scikit-learn (M3), scipy and pingouin (M5-M9), statsmodels, openpyxl (M9).
+    "scikit-learn>=1.9,<1.10",  # StratifiedGroupKFold for the CV plan (M3)
+    # Added later: scipy and pingouin (M5-M9), statsmodels, openpyxl (M9).
 ]
 
 # Adds `echo-bench report ...` on machines where this package is installed (the desktop).
 # echo-bench finds it through this entry point and never imports echo_analysis itself.
 [project.entry-points."echo_bench.plugins"]
 report = "echo_analysis.report:app"
+cv = "echo_analysis.cv:app"
 
 [tool.uv.sources]
 echo-bench = { workspace = true }

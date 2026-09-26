@@ -132,3 +132,67 @@ def tiny_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str,
 def card_fields() -> Callable[..., dict[str, object]]:
     """Valid model-card fields for the tiny model (tests add files_sha256 or overrides)."""
     return tiny_card_fields
+
+
+# ------------------------------------------------------------- M3 fixtures
+# Tiny fake corpora with the real TORGO and UASpeech layouts and file names.
+
+
+def _wav(path: Path, seconds: float = 0.2, rate: int = 16000) -> None:
+    import soundfile as sf
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    t = np.arange(int(seconds * rate)) / rate
+    sf.write(str(path), (0.1 * np.sin(2 * np.pi * 220 * t)).astype(np.float32), rate)
+
+
+@pytest.fixture
+def torgo_root(tmp_path: Path) -> Path:
+    """F01 (severe) with 4 sessions of 'yes', M03 (mild), and two controls."""
+    root = tmp_path / "TORGO"
+    prompts = {
+        "0001": "yes",
+        "0002": "No.",
+        "0003": "[relax your mouth in its normal position]",
+        "0004": "input/images/cat.jpg",
+        "0005": "The quick brown fox",
+    }
+    for group, speaker, sessions in (
+        ("F", "F01", 4),
+        ("M", "M03", 1),
+        ("FC", "FC01", 1),
+        ("MC", "MC01", 1),
+    ):
+        for n in range(1, sessions + 1):
+            session = root / group / speaker / f"Session{n}"
+            for pid, prompt in prompts.items():
+                (session / "prompts").mkdir(parents=True, exist_ok=True)
+                (session / "prompts" / f"{pid}.txt").write_text(prompt + "\n")
+                _wav(session / "wav_arrayMic" / f"{pid}.wav")
+                if not (speaker == "M03" and pid == "0002"):  # one prompt only on the array mic
+                    _wav(session / "wav_headMic" / f"{pid}.wav")
+    (root / "M" / "M03" / "Session1" / "wav_headMic" / "0005.wav").write_bytes(b"not audio")
+    return root
+
+
+@pytest.fixture
+def uaspeech_root(tmp_path: Path) -> Path:
+    root = tmp_path / "UASpeech" / "audio"
+    words = ["D1", "LA", "C1", "CW1"]
+    for speaker in ("F02", "M04", "M08", "CF02", "CM01"):
+        for block, uncommon in (("B1", "UW1"), ("B2", "UW101"), ("B3", "UW201")):
+            for word in [*words, uncommon]:
+                mics = ["M2", "M8"] if (speaker == "M08" and word == "LA") else ["M5", "M2"]
+                for mic in mics:
+                    _wav(root / speaker / f"{speaker}_{block}_{word}_{mic}.wav")
+        _wav(root / speaker / f"{speaker}_B1_D1_M1.wav")  # sync-tone mic, always skipped
+    (root / "README.txt").write_text("not audio")
+    return root
+
+
+@pytest.fixture
+def speaker_tables() -> dict[str, Path]:
+    return {
+        "torgo": REPO_ROOT / "configs" / "datasets" / "torgo_speakers.csv",
+        "uaspeech": REPO_ROOT / "configs" / "datasets" / "uaspeech_speakers.csv",
+    }
