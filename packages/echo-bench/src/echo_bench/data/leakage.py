@@ -67,6 +67,26 @@ def _speakers(db: Session) -> list[Issue]:
     ]
 
 
+def _durations(db: Session) -> list[Issue]:
+    rows = db.execute(
+        text(
+            """
+            SELECT d.name, COUNT(*) FROM utterance u JOIN dataset d ON d.id = u.dataset_id
+            WHERE u.is_primary_channel = 1 AND u.duration_ms < 100 GROUP BY d.name
+            """
+        )
+    ).all()
+    return [
+        Issue(
+            "data",
+            "warning",
+            f"{name}: {n} recording(s) shorter than 0.1 s (probably not speech); "
+            "encoders can't process them and `echo-train embed` skips them",
+        )
+        for name, n in rows
+    ]
+
+
 def _plans(db: Session) -> list[Issue]:
     issues: list[Issue] = []
     plans = db.execute(
@@ -143,4 +163,4 @@ def _plans(db: Session) -> list[Issue]:
 
 
 def validate(db: Session) -> list[Issue]:
-    return _groups(db) + _speakers(db) + _plans(db)
+    return _groups(db) + _speakers(db) + _durations(db) + _plans(db)

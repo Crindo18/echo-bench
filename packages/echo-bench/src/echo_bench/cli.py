@@ -814,8 +814,16 @@ def fewshot_quick(
     ks = k or [1, 2, 3]
     conditions = ["SI", *(f"K={n}" for n in ks)]
     overall: list[tuple[str, dict[str, float | None]]] = []
-    for path in embeddings:
-        es = load_embeddings(path)
+    sets = [load_embeddings(path) for path in embeddings]
+    if len(sets) > 1:
+        common = set.intersection(*(set(es.group) for es in sets))
+        if any(len(es.group) != len(common) for es in sets):
+            console.print(
+                f"{WARN} Comparing on the {len(common)} recordings that every file contains "
+                "(some encoders skipped recordings the others kept)."
+            )
+            sets = [es.restricted(common) for es in sets]
+    for es in sets:
         hint = str(es.metadata.get("manifest", "")).split("-")[0]
         groups = _speaker_groups(speakers, hint)
         results = evaluate(

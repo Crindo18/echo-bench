@@ -107,3 +107,30 @@ def test_cli_compares_encoders(tmp_path: Path, monkeypatch) -> None:
     )
     assert result.exit_code == 0, result.output
     assert "side by side" in result.output and "Chance is about 10%" in result.output
+
+
+def test_several_files_are_compared_on_the_recordings_they_share(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    full = _write(tmp_path / "full.npz", structured=True, source="hf:full")
+    data = dict(np.load(full))
+    keep = np.arange(len(data["embeddings"])) != 0  # this encoder skipped one recording
+    np.savez(tmp_path / "short.npz", **{k: (v[keep] if v.ndim else v) for k, v in data.items()})
+    result = CliRunner().invoke(
+        app,
+        [
+            "fewshot",
+            "quick",
+            "--embeddings",
+            str(full),
+            "--embeddings",
+            str(tmp_path / "short.npz"),
+            "--k",
+            "1",
+            "--episodes",
+            "2",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "Comparing on the 287 recordings" in result.output  # 6 speakers x 12 classes x 4 - 1

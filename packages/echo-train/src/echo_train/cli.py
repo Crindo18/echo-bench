@@ -254,6 +254,12 @@ def embed_command(
         f"[green]✓[/green] {summary['count']} embeddings of size {summary['dim']} in "
         f"{summary['seconds']:.0f} s -> {out}"
     )
+    skipped = summary["skipped_too_short"]
+    if skipped:
+        console.print(
+            f"[yellow]![/yellow] Skipped {len(skipped)} recording(s) too short for the encoder "
+            f"(under ~0.07 s, not real speech), e.g. {skipped[0]}. Listed in the file's metadata."
+        )
     console.print(
         "Next (repository root): uv run echo-bench fewshot quick --embeddings <this file> [--embeddings <another>]"
     )

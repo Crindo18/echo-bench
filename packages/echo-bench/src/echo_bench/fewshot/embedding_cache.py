@@ -1,7 +1,7 @@
 """Embedding files from `echo-train embed` (blueprint ADR-4: one .npz per model and dataset)."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,18 @@ class EmbeddingSet:
     group: npt.NDArray[np.str_]
     session: npt.NDArray[np.str_]
     metadata: dict[str, Any]
+
+    def restricted(self, groups: set[str]) -> "EmbeddingSet":
+        """Only the given recordings (to compare encoders on identical data)."""
+        keep = np.isin(self.group, sorted(groups))
+        return replace(
+            self,
+            embeddings=self.embeddings[keep],
+            speaker=self.speaker[keep],
+            label=self.label[keep],
+            group=self.group[keep],
+            session=self.session[keep],
+        )
 
 
 def load_embeddings(path: Path) -> EmbeddingSet:

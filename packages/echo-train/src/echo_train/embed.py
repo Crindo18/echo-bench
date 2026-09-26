@@ -70,6 +70,32 @@ def find_checkpoint(root: Path) -> Checkpoint:
     return Checkpoint(root=root, config=config, weights=weights[0])
 
 
+def legacy_renames(state: dict[str, Any], own: dict[str, Any]) -> dict[str, str]:
+    """Tensor names that changed between ESPnet versions without the layer changing.
+
+    Older ESPnet wrapped some layers in nn.Sequential; for example the conv2d input stage
+    stored its output layer together with the position encoding, as
+    `encoder.embed.out.0.weight`, and current ESPnet stores the same layer as
+    `encoder.embed.out.weight`. An unknown checkpoint tensor is renamed only if dropping
+    ONE numeric segment from its name gives exactly one missing model tensor with the
+    same shape. Anything else is left for the fit check to reject."""
+    missing = {k for k in own if k.startswith(ENCODER_PREFIXES) and k not in state}
+    renames: dict[str, str] = {}
+    for old in state:
+        if old in own or not old.startswith(ENCODER_PREFIXES):
+            continue
+        parts = old.split(".")
+        candidates = {
+            ".".join(parts[:i] + parts[i + 1 :]) for i, part in enumerate(parts) if part.isdigit()
+        } & missing
+        if len(candidates) != 1:
+            continue
+        new = candidates.pop()
+        if tuple(state[old].shape) == tuple(own[new].shape) and new not in renames.values():
+            renames[old] = new
+    return renames
+
+
 @contextlib.contextmanager
 def _inside(folder: Path) -> Iterator[None]:
     previous = Path.cwd()
@@ -111,6 +137,8 @@ def load_model(
     if not random_weights:
         state = torch.load(checkpoint.weights, map_location="cpu", weights_only=True)
         own = model.state_dict()
+        renames = legacy_renames(state, own)
+        state = {renames.get(k, k): v for k, v in state.items()}
         needed = [k for k in own if k.startswith(ENCODER_PREFIXES)]
         missing = [k for k in needed if k not in state]
         reshaped = [
@@ -118,12 +146,18 @@ def load_model(
         ]
         unknown = [k for k in state if k.startswith(ENCODER_PREFIXES) and k not in own]
         if missing or reshaped or unknown:
-            example = (missing or reshaped or unknown)[0]
+
+            def listed(keys: list[str]) -> str:
+                if not keys:
+                    return "none"
+                return ", ".join(keys[:4]) + (" ..." if len(keys) > 4 else "")
+
             raise EmbedError(
-                f"{checkpoint.weights.name} does not fit this ESPnet version's model: "
-                f"{len(missing)} missing, {len(reshaped)} with other shapes, {len(unknown)} unknown "
-                f"encoder tensors (for example {example}). Its embeddings would be partly random."
+                f"{checkpoint.weights.name} does not fit this ESPnet version's model, so its "
+                f"embeddings would be partly random. Missing: {listed(missing)}. "
+                f"Other shapes: {listed(reshaped)}. Unknown: {listed(unknown)}."
             )
+        info["renamed_tensors"] = renames
         model.load_state_dict({k: v for k, v in state.items() if k in own}, strict=False)
         info.update(
             weights_state="trained",
@@ -179,22 +213,31 @@ def embed_manifest(
     checkpoint = find_checkpoint(fetch(model_source))
     model, info, sample_rate = load_model(checkpoint, random_weights=random_weights)
     model.to(device)
-    progress(
-        f"Model: {model_source} ({info['encoder']}, {info['weights_state']}"
-        + (
-            f", all {info['encoder_tensors_loaded']} encoder tensors loaded)"
-            if not random_weights
-            else ")"
-        )
+    loaded = (
+        "" if random_weights else f", all {info['encoder_tensors_loaded']} encoder tensors loaded"
     )
+    renamed = info.get("renamed_tensors") or {}
+    note = f", {len(renamed)} renamed from an older ESPnet layout" if renamed else ""
+    progress(f"Model: {model_source} ({info['encoder']}, {info['weights_state']}{loaded}{note})")
     started = time.perf_counter()
-    vectors = []
+    vectors, kept, skipped = [], [], []
     for index, record in enumerate(records, start=1):
-        vectors.append(
-            embed_audio(model, read_audio(root / record["audio_path"], sample_rate), device)
-        )
+        try:
+            audio = read_audio(root / record["audio_path"], sample_rate)
+            vectors.append(embed_audio(model, audio, device))
+            kept.append(record)
+        except Exception as error:
+            # Recordings shorter than the input stage's minimum (~0.07 s, not real speech):
+            # ESPnet raises TooShortUttError (its module moved between versions, so match
+            # by name). Skip them; any other error still stops the run.
+            if type(error).__name__ != "TooShortUttError":
+                raise
+            skipped.append(record["audio_path"])
         if index % 500 == 0 or index == len(records):
             progress(f"  {index}/{len(records)} utterances embedded")
+    if not vectors:
+        raise EmbedError("no recording was long enough for the encoder")
+    records = kept
     embeddings = np.stack(vectors).astype(np.float32)
     metadata = {
         "model_source": model_source,
@@ -203,6 +246,7 @@ def embed_manifest(
         "pooling": "masked_mean",
         "manifest": manifest.name,
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "skipped_too_short": skipped,
         "created_at": datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z"),
     }
     out.parent.mkdir(parents=True, exist_ok=True)

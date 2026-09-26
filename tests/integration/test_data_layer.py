@@ -164,3 +164,23 @@ def test_two_folds_with_a_validation_fold_is_refused(
     config.write_text(yaml.safe_dump({"name": "k2", "k": 2, "datasets": ["torgo"]}))
     result = runner.invoke(app, ["cv", "plan", "--config", str(config), "--db", db])
     assert result.exit_code != 0
+
+
+def test_validate_warns_about_recordings_too_short_to_be_speech(
+    tmp_path: Path,
+    monkeypatch,
+    torgo_root: Path,
+    uaspeech_root: Path,
+    speaker_tables: dict[str, Path],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    db = _ingest_both(tmp_path, torgo_root, uaspeech_root, speaker_tables)
+    con = sqlite3.connect(db)
+    con.execute(
+        "UPDATE utterance SET duration_ms = 50 WHERE rowid = (SELECT MIN(rowid) FROM utterance)"
+    )
+    con.commit()
+    con.close()
+    result = runner.invoke(app, ["data", "validate", "--db", db])
+    assert result.exit_code == 0  # a warning, not an error
+    assert "shorter than 0.1 s" in result.output
