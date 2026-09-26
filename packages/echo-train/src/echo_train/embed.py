@@ -32,6 +32,7 @@ from typing import Any
 import numpy as np
 import soundfile as sf
 import torch
+from espnet2.asr.encoder.abs_encoder import AbsEncoder  # noqa: F401  (import kept lazy)
 
 ENCODER_PREFIXES = ("frontend.", "normalize.", "preencoder.", "encoder.")
 
@@ -153,10 +154,17 @@ def read_audio(path: Path, sample_rate: int) -> np.ndarray:
     return np.ascontiguousarray(mono, dtype=np.float32)
 
 
-def embed_audio(model: Any, audio: np.ndarray, device: str) -> np.ndarray:
+def embed_audio(model: Any, audio: np.ndarray, device: str) -> np.ndarray | None:
     speech = torch.from_numpy(audio).unsqueeze(0).to(device)
-    with torch.inference_mode():
-        frames, lengths = model.encode(speech, torch.tensor([audio.shape[0]], device=device))
+    try:
+        with torch.inference_mode():
+            frames, lengths = model.encode(speech, torch.tensor([audio.shape[0]], device=device))
+    except Exception as error:  # noqa: BLE001
+        if type(error).__name__ == "TooShortUttError" or "Padding size should be less" in str(
+            error
+        ):
+            return None  # near-silent / truncated clip; skip it
+        raise
     valid = int(lengths[0])
     return frames[0, :valid].mean(dim=0).float().cpu().numpy()
 
@@ -197,12 +205,23 @@ def embed_manifest(
     )
     started = time.perf_counter()
     vectors = []
+    kept_records = []
+    skipped = 0
+    MIN_SAMPLES = 640  # ~40 ms at 16 kHz; shorter clips can't survive the STFT/subsampling
     for index, record in enumerate(records, start=1):
-        vectors.append(
-            embed_audio(model, read_audio(root / record["audio_path"], sample_rate), device)
-        )
+        audio = read_audio(root / record["audio_path"], sample_rate)
+        if audio.shape[0] < MIN_SAMPLES:
+            skipped += 1
+            continue
+        vector = embed_audio(model, audio, device)
+        if vector is None:
+            skipped += 1
+            continue
+        vectors.append(vector)
+        kept_records.append(record)
         if index % 500 == 0 or index == len(records):
-            progress(f"  {index}/{len(records)} utterances embedded")
+            progress(f"  {index}/{len(records)} utterances embedded ({skipped} skipped: too short)")
+    records = kept_records  # only keep the ones we actually embedded
     embeddings = np.stack(vectors).astype(np.float32)
     metadata = {
         "model_source": model_source,
