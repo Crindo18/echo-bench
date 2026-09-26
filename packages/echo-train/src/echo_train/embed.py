@@ -111,6 +111,14 @@ def load_model(
     if not random_weights:
         state = torch.load(checkpoint.weights, map_location="cpu", weights_only=True)
         own = model.state_dict()
+
+        # ESPnet 202209 -> 202610 renamed the input projection: encoder.embed.out.{w,b}
+        # became encoder.embed.out.0.{w,b}. Same tensors, same shapes; map the old names
+        # to the new ones so the strict check below still guards every encoder weight.
+        state = {
+            k.replace("encoder.embed.out.0.", "encoder.embed.out."): v for k, v in state.items()
+        }
+
         needed = [k for k in own if k.startswith(ENCODER_PREFIXES)]
         missing = [k for k in needed if k not in state]
         reshaped = [
