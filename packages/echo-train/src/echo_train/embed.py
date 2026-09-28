@@ -1,15 +1,22 @@
-"""Utterance embeddings from a trained ESPnet ASR encoder (early accuracy check, before M5).
+"""Utterance embeddings from a trained speech encoder (early accuracy check, before M5).
 
-Any ESPnet ASR model works: a Hugging Face repo ("hf:pyf98/librispeech_100_e_branchformer")
-or a local folder with exp/<run>/config.yaml and a .pth file next to it. The model's own
-frontend (log-mel + normalization) runs inside `encode`, so each checkpoint gets the exact
-features it was trained on. Each utterance becomes the mean of its encoder frames (the
-same masked mean pooling ECHO deploys).
+Two kinds of model:
+
+  ESPnet ASR models: a Hugging Face repo ("hf:pyf98/librispeech_100_e_branchformer") or a
+      local folder with exp/<run>/config.yaml and a .pth file next to it. The model's own
+      frontend (log-mel + normalization) runs inside `encode`.
+  Moonshine (original, not streaming): "moonshine:UsefulSensors/moonshine-tiny" or
+      "moonshine:<local folder>" (Hugging Face transformers format). Only the encoder is
+      used; its convolutional frontend reads the raw waveform, so there is no log-mel step.
+
+Either way each checkpoint gets the exact features it was trained on, and each utterance
+becomes the mean of its encoder frames (the same masked mean pooling ECHO deploys).
 
 Why the weights are checked here: ESPnet loads checkpoints with strict=False, so tensors
 that don't match the installed ESPnet version would be skipped silently, leaving part of
 the encoder random. load_model() refuses unless every frontend, normalization and encoder
-tensor is present with the right shape.
+tensor is present with the right shape. load_moonshine() applies the same rule to the
+Moonshine encoder (transformers also fills missing tensors with random values).
 
 Output: one .npz per model and dataset (blueprint ADR-4), with the embeddings, the
 manifest fields needed for few-shot episodes, and a JSON metadata string.
@@ -34,10 +41,18 @@ import soundfile as sf
 import torch
 
 ENCODER_PREFIXES = ("frontend.", "normalize.", "preencoder.", "encoder.")
+MOONSHINE = "moonshine:"
+MOONSHINE_ENCODER_PREFIX = "model.encoder."
+MOONSHINE_FILES = ["*.json", "*.safetensors"]  # config, feature extractor, weights; no tokenizer
 
 
 class EmbedError(Exception):
     pass
+
+
+class TooShortUttError(EmbedError):
+    """A clip too short for Moonshine's frontend. Same name as ESPnet's error, so
+    embed_manifest skips it the same way."""
 
 
 @dataclass(frozen=True)
@@ -45,6 +60,15 @@ class Checkpoint:
     root: Path  # config paths (stats file, token list) are relative to this folder
     config: Path
     weights: Path
+
+
+@dataclass(frozen=True)
+class Embedder:
+    """One loaded model, ready to turn audio at `sample_rate` into one vector."""
+
+    embed: Callable[[np.ndarray], np.ndarray]
+    info: dict[str, Any]
+    sample_rate: int
 
 
 def fetch(model: str) -> Path:
@@ -187,6 +211,117 @@ def embed_audio(model: Any, audio: np.ndarray, device: str) -> np.ndarray:
     return frames[0, :valid].mean(dim=0).float().cpu().numpy()
 
 
+def fetch_moonshine(source: str) -> Path:
+    """A local folder as is; otherwise a Hugging Face repo id, downloaded (and cached)."""
+    path = Path(source).expanduser()
+    if path.is_dir():
+        return path
+    from huggingface_hub import snapshot_download
+
+    return Path(snapshot_download(source, allow_patterns=MOONSHINE_FILES))
+
+
+def load_moonshine(
+    folder: Path, *, random_weights: bool = False
+) -> tuple[Any, Any, dict[str, Any], int]:
+    """(encoder in eval mode on CPU, feature extractor, metadata, sample rate)."""
+    try:
+        from transformers import AutoConfig, AutoFeatureExtractor, MoonshineForConditionalGeneration
+        from transformers.utils import logging as hf_logging
+    except ImportError as error:
+        raise EmbedError(
+            "Moonshine needs transformers: run "
+            '`uv add "transformers>=5.17,<6"` in packages/echo-train'
+        ) from error
+    hf_logging.set_verbosity_error()
+    hf_logging.disable_progress_bar()
+
+    config = AutoConfig.from_pretrained(folder)
+    if config.model_type != "moonshine":
+        raise EmbedError(
+            f"{folder}: model type {config.model_type!r}; only the original Moonshine "
+            "('moonshine') is supported so far, not the streaming version"
+        )
+    weights = folder / "model.safetensors"
+    if random_weights:
+        torch.manual_seed(0)  # the same untrained floor on every run
+        model = MoonshineForConditionalGeneration(config)
+    else:
+        model, loading = MoonshineForConditionalGeneration.from_pretrained(
+            folder, output_loading_info=True
+        )
+        mismatched = [
+            m[0] if isinstance(m, (tuple, list)) else m for m in loading["mismatched_keys"]
+        ]
+        problems = {
+            "missing": [
+                k for k in loading["missing_keys"] if k.startswith(MOONSHINE_ENCODER_PREFIX)
+            ],
+            "with other shapes": [
+                k for k in mismatched if str(k).startswith(MOONSHINE_ENCODER_PREFIX)
+            ],
+            "unknown": [
+                k for k in loading["unexpected_keys"] if k.startswith(MOONSHINE_ENCODER_PREFIX)
+            ],
+        }
+        if any(problems.values()):
+            example = next(k for keys in problems.values() for k in keys)
+            counts = ", ".join(f"{len(keys)} {what}" for what, keys in problems.items())
+            raise EmbedError(
+                f"{folder} does not fit this transformers version's Moonshine: {counts} "
+                f"encoder tensors (for example {example}). Its embeddings would be partly random."
+            )
+    encoder = model.get_encoder().eval()
+    extractor = AutoFeatureExtractor.from_pretrained(folder)
+    fs = int(extractor.sampling_rate)
+    loaded = sum(1 for k in model.state_dict() if k.startswith(MOONSHINE_ENCODER_PREFIX))
+    info: dict[str, Any] = {
+        "config": "config.json",
+        "encoder": "moonshine",
+        "encoder_conf": {
+            "output_size": config.hidden_size,
+            "num_blocks": config.encoder_num_hidden_layers,
+            "attention_heads": config.encoder_num_attention_heads,
+            "linear_units": config.intermediate_size,
+        },
+        "frontend_conf": {"type": "raw waveform, convolutional (inside the encoder)", "fs": fs},
+        "encoder_params": sum(p.numel() for p in encoder.parameters()),
+        "weights_state": "random_init" if random_weights else "trained",
+        "weights_file": None if random_weights else weights.name,
+        "weights_sha256": None
+        if random_weights or not weights.is_file()
+        else hashlib.sha256(weights.read_bytes()).hexdigest(),
+        "encoder_tensors_loaded": 0 if random_weights else loaded,
+    }
+    return encoder, extractor, info, fs
+
+
+def embed_moonshine(encoder: Any, extractor: Any, audio: np.ndarray, device: str) -> np.ndarray:
+    inputs = extractor(audio, sampling_rate=extractor.sampling_rate, return_tensors="pt")
+    values = inputs[extractor.model_input_names[0]].to(device)
+    with torch.inference_mode():
+        frames = encoder(values).last_hidden_state  # (1, frames, hidden)
+    if frames.shape[1] == 0:
+        raise TooShortUttError(
+            f"a {audio.shape[0]}-sample clip is too short for Moonshine's frontend"
+        )
+    # One unpadded utterance: every frame is valid, so this is the same masked mean as ESPnet's.
+    return frames[0].mean(dim=0).float().cpu().numpy()
+
+
+def open_embedder(model_source: str, *, random_weights: bool, device: str) -> Embedder:
+    """Load `model_source` (ESPnet or moonshine:...) and return a ready Embedder."""
+    if model_source.startswith(MOONSHINE):
+        folder = fetch_moonshine(model_source.removeprefix(MOONSHINE))
+        encoder, extractor, info, fs = load_moonshine(folder, random_weights=random_weights)
+        encoder.to(device)
+        return Embedder(lambda audio: embed_moonshine(encoder, extractor, audio, device), info, fs)
+    checkpoint = find_checkpoint(fetch(model_source))
+    model, info, fs = load_model(checkpoint, random_weights=random_weights)
+    model.to(device)
+    return Embedder(lambda audio: embed_audio(model, audio, device), info, fs)
+
+
 def embed_manifest(
     manifest: Path,
     root: Path,
@@ -210,9 +345,10 @@ def embed_manifest(
             f"{len(missing_files)} audio files not found under {root} (first: {missing_files[0]})"
         )
 
-    checkpoint = find_checkpoint(fetch(model_source))
-    model, info, sample_rate = load_model(checkpoint, random_weights=random_weights)
-    model.to(device)
+    embedder = open_embedder(model_source, random_weights=random_weights, device=device)
+    info, sample_rate = embedder.info, embedder.sample_rate
+    if "encoder_params" in info:
+        progress(f"Encoder parameters: {info['encoder_params'] / 1e6:.2f} M")
     loaded = (
         "" if random_weights else f", all {info['encoder_tensors_loaded']} encoder tensors loaded"
     )
@@ -224,12 +360,13 @@ def embed_manifest(
     for index, record in enumerate(records, start=1):
         try:
             audio = read_audio(root / record["audio_path"], sample_rate)
-            vectors.append(embed_audio(model, audio, device))
+            vectors.append(embedder.embed(audio))
             kept.append(record)
         except Exception as error:
             # Recordings shorter than the input stage's minimum (~0.07 s, not real speech):
             # ESPnet raises TooShortUttError (its module moved between versions, so match
-            # by name). Skip them; any other error still stops the run.
+            # by name), and so does embed_moonshine. Skip them; any other error still stops
+            # the run.
             if type(error).__name__ != "TooShortUttError":
                 raise
             skipped.append(record["audio_path"])
