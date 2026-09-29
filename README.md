@@ -215,6 +215,18 @@ uv run echo-bench fewshot quick --embeddings data/embeddings/torgo-v1__ls100-ebf
 Add `--limit 200` to an `embed` command for a quick trial, and `--device cuda` if PyTorch sees
 your GPU. The first run downloads each model once (into the Hugging Face cache).
 
+**Word pool.** By default (`--pool matched`) SI and every K draw the same words in each
+episode: words the speaker recorded at least max(K) + 1 times. On UASpeech that leaves out the
+300 uncommon words, which are recorded once and could never be used for K. Before this option,
+SI also drew those words, so SI and K were measured on different words; `--pool all` reproduces
+those older numbers exactly, for comparison only.
+
+**Paired comparison.** With several `--embeddings` files, the first is the reference and every
+other encoder is compared with it speaker by speaker (dysarthric speakers only): mean difference,
+how many speakers were better/worse, and a two-sided Wilcoxon signed-rank test, exact up to 20
+speakers, with Holm's correction across the table. Put the thesis model first. `--csv <file>`
+saves every speaker's accuracy for Chapter 5.
+
 Reading the result:
 
 - **SI** uses prototypes from other speakers only (the K = 0 baseline); **K=k** uses k of the

@@ -806,10 +806,30 @@ def fewshot_quick(
     episodes: Annotated[int, typer.Option(help="Random episodes per speaker and condition.")] = 20,
     seed: int = 42,
     normalize: Annotated[bool, typer.Option(help="Scale embeddings to length 1 first.")] = False,
+    pool: Annotated[
+        str,
+        typer.Option(
+            help="matched: SI and every K use the same words (compare SI with K). "
+            "all: the original behaviour, SI also uses words recorded once (reproduces older runs)."
+        ),
+    ] = "matched",
+    csv_out: Annotated[
+        Path | None,
+        typer.Option("--csv", help="Also save every speaker's accuracy (for the statistics)."),
+    ] = None,
 ) -> None:
-    """Early accuracy check: speaker-independent (SI) and personal K-shot prototypes per speaker."""
+    """Early accuracy check: speaker-independent (SI) and personal K-shot prototypes per speaker.
+
+    With several --embeddings files, the first is the reference: every other encoder is
+    compared with it speaker by speaker (paired Wilcoxon signed-rank test, dysarthric speakers).
+    """
     from echo_bench.fewshot.embedding_cache import load_embeddings
+    from echo_bench.fewshot.paired import compare, holm
     from echo_bench.fewshot.quick import evaluate, summarize
+
+    if pool not in ("matched", "all"):
+        console.print(f"{FAIL} --pool must be 'matched' or 'all'")
+        raise typer.Exit(2)
 
     ks = k or [1, 2, 3]
     conditions = ["SI", *(f"K={n}" for n in ks)]
@@ -823,15 +843,27 @@ def fewshot_quick(
                 "(some encoders skipped recordings the others kept)."
             )
             sets = [es.restricted(common) for es in sets]
+    per_speaker: list[tuple[str, list]] = []
     for es in sets:
         hint = str(es.metadata.get("manifest", "")).split("-")[0]
         groups = _speaker_groups(speakers, hint)
         results = evaluate(
-            es, groups, ks=ks, ways=ways, episodes=episodes, seed=seed, normalize=normalize
+            es,
+            groups,
+            ks=ks,
+            ways=ways,
+            episodes=episodes,
+            seed=seed,
+            normalize=normalize,
+            pool=pool,  # type: ignore[arg-type]
         )
+        per_speaker.append((es.name, results))
         rows = summarize(results, conditions)
+        sizes = sorted({r.pool_size.get("SI", 0) for r in results})
+        words = f"{sizes[0]}" if len(sizes) == 1 else f"{sizes[0]}-{sizes[-1]}"
         table = Table(
-            title=f"{es.name}: {len(results)} speakers, {len(set(es.label))} classes, {ways}-way episodes",
+            title=f"{es.name}: {len(results)} speakers, {len(set(es.label))} classes, "
+            f"{ways}-way episodes, {pool} word pool ({words} words for SI per speaker)",
             title_justify="left",
         )
         for column in ("group", "speakers", *conditions):
@@ -847,10 +879,92 @@ def fewshot_quick(
         for name, values in overall:
             table.add_row(name, *(_pct(values.get(c)) for c in conditions))
         console.print(table)
+        _paired_table(per_speaker, conditions, compare, holm)
+    if csv_out is not None:
+        _write_per_speaker_csv(csv_out, per_speaker, conditions, pool)
+        console.print(f"{OK} Per-speaker accuracy saved to {csv_out}")
+    if pool == "all":
+        console.print(
+            f"{WARN} --pool all: SI and K were drawn from different words; compare encoders "
+            "within a column, not SI with K."
+        )
     console.print(
         f"Chance is about {100 / ways:.0f}% ({ways}-way). SI = prototypes from other speakers only; "
         "K=k = k of the speaker's own recordings per class. A quick check, not the thesis protocol (M5)."
     )
+
+
+def _paired_table(per_speaker, conditions, compare, holm) -> None:
+    """Every other encoder minus the first, speaker by speaker (dysarthric speakers only)."""
+    (ref_name, ref_results), others = per_speaker[0], per_speaker[1:]
+
+    def accuracies(results, condition):
+        return {
+            r.speaker: r.accuracy.get(condition) for r in results if r.group not in ("control", "?")
+        }
+
+    comparisons = [
+        (name, c, compare(accuracies(ref_results, c), accuracies(results, c)))
+        for name, results in others
+        for c in conditions
+    ]
+    adjusted = holm([result.p_value for _, _, result in comparisons])
+    table = Table(
+        title=f"Paired by speaker: each encoder minus {ref_name} (dysarthric speakers)",
+        title_justify="left",
+    )
+    for column in (
+        "encoder",
+        "condition",
+        "speakers",
+        "mean diff",
+        "better/worse/same",
+        "p",
+        "p (Holm)",
+    ):
+        table.add_column(column, justify="left" if column in ("encoder", "condition") else "right")
+
+    def p_text(p):
+        return "-" if p is None else ("<0.001" if p < 0.001 else f"{p:.3f}")
+
+    for (name, condition, result), p_holm in zip(comparisons, adjusted, strict=True):
+        table.add_row(
+            name,
+            condition,
+            str(result.n_speakers),
+            f"{100 * result.mean_diff:+.1f} pts" if result.n_speakers else "-",
+            f"{result.wins}/{result.losses}/{result.ties}",
+            p_text(result.p_value),
+            p_text(p_holm),
+        )
+    console.print(table)
+    console.print(
+        "Wilcoxon signed-rank test, two-sided, exact up to 20 speakers. Holm corrects for "
+        "testing every row of this table at once; use it when claiming a difference."
+    )
+
+
+def _write_per_speaker_csv(path: Path, per_speaker, conditions, pool: str) -> None:
+    import csv
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(["encoder", "speaker", "group", "pool", *conditions])
+        for name, results in per_speaker:
+            for r in results:
+                writer.writerow(
+                    [
+                        name,
+                        r.speaker,
+                        r.group,
+                        pool,
+                        *(
+                            "" if r.accuracy.get(c) is None else f"{r.accuracy[c]:.6f}"
+                            for c in conditions
+                        ),
+                    ]
+                )
 
 
 def _load_plugins() -> None:
