@@ -1,35 +1,36 @@
-# UASpeech speakers (Kim et al., 2008). Intelligibility = percentage of words correctly transcribed
-# by five naive listeners; tiers: very_low 0-25, low 26-50, mid 51-75, high 76-100.
-# Values as tabulated by Martinez et al. (2015, University of Sheffield) and in the Interspeech 2024
-# prototype-based dysarthric ASR paper; one other source lists M01 as 17%.
-# VERIFY against the UASpeech documentation before reporting. Control codes follow C<F|M><nn>;
-# if the ingester reports an unknown speaker code, add a row for it here.
-code,cohort,severity_tier,intelligibility_pct,sex
-M04,dysarthric,very_low,2,M
-F03,dysarthric,very_low,6,F
-M12,dysarthric,very_low,7.4,M
-M01,dysarthric,very_low,15,M
-M07,dysarthric,low,28,M
-F02,dysarthric,low,29,F
-M16,dysarthric,low,43,M
-M05,dysarthric,mid,58,M
-F04,dysarthric,mid,62,F
-M11,dysarthric,mid,62,M
-M09,dysarthric,high,86,M
-M14,dysarthric,high,90.4,M
-M10,dysarthric,high,93,M
-M08,dysarthric,high,93,M
-F05,dysarthric,high,95,F
-CF02,control,,,F
-CF03,control,,,F
-CF04,control,,,F
-CF05,control,,,F
-CM01,control,,,M
-CM04,control,,,M
-CM05,control,,,M
-CM06,control,,,M
-CM08,control,,,M
-CM09,control,,,M
-CM10,control,,,M
-CM12,control,,,M
-CM13,control,,,M
+# UASpeech speaker table — cohort and intelligibility tier.
+# Source: Kim et al. (2008), "Dysarthric speech database for universal access
+# research." Intelligibility bands: very_low 0-25%, low 26-50%, mid 51-75%,
+# high 76-100%. VERIFY against the corpus documentation before reporting.
+# severity in {very_low, low, mid, high, control}. cohort in {dysarthric, control}.
+code,cohort,severity
+M04,dysarthric,very_low
+F03,dysarthric,very_low
+M12,dysarthric,very_low
+M01,dysarthric,very_low
+M07,dysarthric,low
+F02,dysarthric,low
+M16,dysarthric,low
+M05,dysarthric,low
+M11,dysarthric,mid
+F04,dysarthric,mid
+M09,dysarthric,mid
+M14,dysarthric,mid
+M10,dysarthric,high
+M08,dysarthric,high
+F05,dysarthric,high
+M06,dysarthric,high
+M13,dysarthric,high
+CM01,control,control
+CM04,control,control
+CM05,control,control
+CM06,control,control
+CM08,control,control
+CM09,control,control
+CM10,control,control
+CM12,control,control
+CM13,control,control
+CF02,control,control
+CF03,control,control
+CF04,control,control
+CF05,control,control

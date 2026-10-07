@@ -1,0 +1,57 @@
+# ECHO Encoder Benchmark — Python dependencies.
+# Verified with Python 3.12. This file installs a CUDA 12.6 GPU build of
+# torch/torchaudio directly (see the PyTorch block below); adjust it for a CPU
+# box or a different CUDA version as noted there.
+#
+# These mirror the lower-bound dependencies in pyproject.toml. For most setups
+# prefer `pip install -e .` (or `uv pip install -e .`) which reads pyproject and
+# also makes the `echo` package importable without PYTHONPATH. Use this file when
+# you want the exact tested versions: `pip install -r requirements.txt`.
+# See the README "Step 1 — Set up the environment" for venv and uv walkthroughs.
+
+# --- PyTorch: GPU (CUDA 12.6) build, guaranteed ---------------------------- #
+# torch + torchaudio (NOT torchvision -- this project uses torchaudio for the
+# LibriSpeech downloader, resampling, and the WavLM Base+ teacher).
+#
+# The "+cu126" local tag is the guarantee: those wheels exist ONLY on PyTorch's
+# CUDA index, never on PyPI, so pip cannot silently substitute a CPU build -- a
+# plain PyPI "torch==2.14.0" does NOT satisfy "torch==2.14.0+cu126". It installs
+# the CUDA build or fails cleanly; it will never quietly land CPU.
+#
+# --extra-index-url (not --index-url): the rest of this file (onnx, onnxruntime,
+# numpy, PyYAML, soundfile) lives on PyPI, and --index-url would REPLACE PyPI and
+# fail to find them. The +cu126 pin makes --extra-index-url safe here.
+#
+# Verify after install:
+#   python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+#   -> expect "...+cu126 True". If False, the driver/toolkit is the problem, not pip.
+# "No matching distribution for torch==2.14.0+cu126"? That torch version has no
+#   cu126 wheel -- pick a CUDA tag it does ship (e.g. cu128) or an older torch.
+# CPU-only machine: replace both "+cu126" with "+cpu" and cu126 -> cpu in the URL.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.14.0+cu126
+torchaudio==2.11.0+cu126
+onnx==1.23.0
+onnxruntime==1.24.4
+numpy==2.4.4
+PyYAML==6.0.3
+soundfile>=0.12          # REQUIRED for audio loading (reads FLAC + WAV via
+                         # libsndfile). LibriSpeech and TORGO are loaded through
+                         # soundfile, NOT torchaudio.load — so a recent torchaudio
+                         # that routes load() through TorchCodec does not break
+                         # training (no `torchcodec` install needed). torchaudio
+                         # is still used for the LibriSpeech download, resampling,
+                         # and the WavLM Base+ teacher.
+
+# Notes:
+#  * torchaudio provides the LibriSpeech downloader and the WavLM Base+ teacher
+#    (torchaudio.pipelines.WAVLM_BASE_PLUS) used by the DPWavLM track.
+#  * onnxruntime is the shared deployment runtime (also install it on the Pi 5
+#    for the latency/RAM numbers).
+#  * The data-hygiene + measurement layer (CV plan, leakage contract, coverage,
+#    scorecard) uses only the standard library + torch — no database, no extra
+#    heavy dependency.
+#  * TORGO is not downloadable via a package; obtain it from
+#    https://www.cs.toronto.edu/~complingweb/data/TORGO/torgo.html, extract it,
+#    and set TORGO_ROOT at the top of scripts/run_all.sh (and pass --root to
+#    scripts/measure.py). See the README "How to use / run" section.

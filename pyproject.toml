@@ -1,50 +1,41 @@
-# ECHO-Bench workspace root (blueprint section 5).
-# This file is not a package. It lists the packages that make up the workspace
-# and holds the settings for the development tools.
-
-[tool.uv.workspace]
-members = ["packages/echo-core", "packages/echo-bench", "packages/echo-analysis"]
-# echo-train is a separate uv project with its own lockfile (ADR-6), so PyTorch
-# and ESPnet never constrain the packages that run on the Raspberry Pi.
-exclude = ["packages/echo-train"]
-
-[dependency-groups]
-dev = [
-    "pytest>=9.1,<10",
-    "hypothesis>=6",
-    "ruff>=0.16,<0.17",
-    "mypy>=2.3,<2.4",
-    "pre-commit>=4.6,<5",
+[project]
+name = "echo-benchmark"
+version = "0.1.0"
+description = "ECHO encoder benchmark: train, quantize, and compare edge speech encoders (Conformer, E-Branchformer, Zipformer, Moonshine, DPWavLM) for atypical/dysarthric speech."
+readme = "README.md"
+requires-python = ">=3.10"
+# Lower bounds only; the exact tested versions are pinned in requirements.txt.
+# Install torch/torchaudio for your platform (CPU or CUDA) from https://pytorch.org.
+dependencies = [
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    "onnx>=1.16",
+    "onnxruntime>=1.18",
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+    # soundfile is REQUIRED: audio (LibriSpeech FLAC + TORGO WAV) is loaded via
+    # soundfile/libsndfile, not torchaudio.load, so a torchaudio that routes
+    # load() through TorchCodec does not require installing `torchcodec`.
+    "soundfile>=0.12",
 ]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-addopts = "-q --import-mode=importlib"
-
-[tool.ruff]
-line-length = 100
-target-version = "py312"
-# Where the first-party packages live, so imports are grouped correctly.
-src = [
-    "packages/echo-core/src",
-    "packages/echo-bench/src",
-    "packages/echo-analysis/src",
-    "packages/echo-train/src",
+[project.optional-dependencies]
+# Optional upstream/official encoders. The reimplementation encoders and the
+# whole pipeline work without these — install only the extra you need.
+#   ebranchformer_espnet  ->  pip install -e ".[espnet]"
+#   moonshine_official    ->  pip install -e ".[moonshine]"
+espnet = [
+    "espnet>=202301",
+    "huggingface_hub>=0.20",
 ]
-# The practice script is a scratchpad (M1 turned it into proper modules). Markdown is
-# excluded because ruff would otherwise reformat code examples inside the documents.
-extend-exclude = ["packages/echo-train/scripts", "*.md"]
-force-exclude = true  # also skip excluded files when pre-commit passes them by name
+moonshine = [
+    "transformers>=5.17",
+    "huggingface_hub>=0.20",
+]
 
-[tool.ruff.lint]
-select = ["E", "F", "W", "I", "B", "UP"]
-ignore = ["E501"]  # the formatter handles line length
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
-[tool.mypy]
-# The pre-commit hook runs mypy on echo_core only (blueprint M0): it ships on the device.
-python_version = "3.12"
-strict = true
-
-[[tool.mypy.overrides]]
-module = ["onnxruntime", "onnxruntime.*", "psutil"]
-ignore_missing_imports = true
+[tool.setuptools.packages.find]
+include = ["echo*"]

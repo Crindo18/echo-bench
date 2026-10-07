@@ -1,21 +1,22 @@
-# TORGO speakers (Rudzicz et al., 2012). The public release has no F02.
-# Severity: speech-language pathologist ratings (Frenchay Dysarthria Assessment) as tabulated in
-# "Training Data Augmentation for Dysarthric Automatic Speech Recognition by
-# Text-to-Dysarthric-Speech Synthesis", Interspeech 2024 (arXiv:2406.08568), Table 1.
-# moderate_severe = "moderate-to-severe". VERIFY against the TORGO documentation before reporting.
-code,cohort,severity_tier,intelligibility_pct,sex
-F01,dysarthric,severe,,F
-F03,dysarthric,moderate,,F
-F04,dysarthric,mild,,F
-M01,dysarthric,severe,,M
-M02,dysarthric,severe,,M
-M03,dysarthric,mild,,M
-M04,dysarthric,severe,,M
-M05,dysarthric,moderate_severe,,M
-FC01,control,,,F
-FC02,control,,,F
-FC03,control,,,F
-MC01,control,,,M
-MC02,control,,,M
-MC03,control,,,M
-MC04,control,,,M
+# TORGO speaker table — cohort and dysarthria severity tier.
+# Source: Rudzicz et al. (2012), "The TORGO database of acoustic and
+# articulatory speech from speakers with dysarthria."
+# VERIFY these tiers against the corpus documentation before reporting: the
+# folds are stratified by (corpus, severity), so a wrong tier changes the split.
+# severity in {severe, moderate, mild, control}. cohort in {dysarthric, control}.
+code,cohort,severity
+F01,dysarthric,severe
+F03,dysarthric,moderate
+F04,dysarthric,mild
+M01,dysarthric,severe
+M02,dysarthric,severe
+M03,dysarthric,mild
+M04,dysarthric,severe
+M05,dysarthric,moderate
+FC01,control,control
+FC02,control,control
+FC03,control,control
+MC01,control,control
+MC02,control,control
+MC03,control,control
+MC04,control,control
